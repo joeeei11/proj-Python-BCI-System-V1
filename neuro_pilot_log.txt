@@ -1,0 +1,77 @@
+2025-10-05 01:16:24 [INFO] NeuroPilot: 2025-10-05 01:16:24,463 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:16:24 [INFO] NeuroPilot: 2025-10-05 01:16:24,465 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:16:25 [INFO] NeuroPilot: 2025-10-05 01:16:25,490 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:16:25 [INFO] NeuroPilot: 2025-10-05 01:16:25,490 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:16:27 [INFO] NeuroPilot: 2025-10-05 01:16:27,467 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:16:27 [INFO] NeuroPilot: 2025-10-05 01:16:27,468 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:16:27 [INFO] NeuroPilot: 2025-10-05 01:16:27,468 [INFO] NeuroPilot: 开始试次投票窗口（期望：left）
+2025-10-05 01:16:27 [INFO] NeuroPilot: 2025-10-05 01:16:27,468 [INFO] NeuroPilot: 开始试次投票窗口（期望：left）
+2025-10-05 01:16:31 [INFO] NeuroPilot: 2025-10-05 01:16:31,967 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:16:31 [INFO] NeuroPilot: 2025-10-05 01:16:31,968 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:16:31 [INFO] NeuroPilot: 2025-10-05 01:16:31,968 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:16:31 [INFO] NeuroPilot: 2025-10-05 01:16:31,969 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:16:31 [INFO] NeuroPilot.Device: 2025-10-05 01:16:31,969 [INFO] NeuroPilot.Device: Auto send skipped (not success)
+2025-10-05 01:16:31 [INFO] NeuroPilot: 2025-10-05 01:16:31,969 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=left，成功=False
+2025-10-05 01:16:31 [INFO] NeuroPilot: 2025-10-05 01:16:31,970 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=left，成功=False
+2025-10-05 01:16:32 [INFO] NeuroPilot: 2025-10-05 01:16:32,478 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:16:32 [INFO] NeuroPilot: 2025-10-05 01:16:32,478 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:16:44 [INFO] NeuroPilot: 2025-10-05 01:16:44,483 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:16:44 [INFO] NeuroPilot: 2025-10-05 01:16:44,483 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:16:45 [INFO] NeuroPilot: 2025-10-05 01:16:45,502 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:16:45 [INFO] NeuroPilot: 2025-10-05 01:16:45,503 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:16:47 [INFO] NeuroPilot: 2025-10-05 01:16:47,482 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:16:47 [INFO] NeuroPilot: 2025-10-05 01:16:47,483 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:16:47 [INFO] NeuroPilot: 2025-10-05 01:16:47,484 [INFO] NeuroPilot: 开始试次投票窗口（期望：right）
+2025-10-05 01:16:47 [INFO] NeuroPilot: 2025-10-05 01:16:47,484 [INFO] NeuroPilot: 开始试次投票窗口（期望：right）
+2025-10-05 01:16:51 [INFO] NeuroPilot: 2025-10-05 01:16:51,982 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:16:51 [INFO] NeuroPilot: 2025-10-05 01:16:51,982 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:16:51 [INFO] NeuroPilot: 2025-10-05 01:16:51,983 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:16:51 [INFO] NeuroPilot: 2025-10-05 01:16:51,983 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:16:51 [INFO] NeuroPilot.Device: 2025-10-05 01:16:51,983 [INFO] NeuroPilot.Device: Auto send skipped (not success)
+2025-10-05 01:16:51 [INFO] NeuroPilot: 2025-10-05 01:16:51,984 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=right，成功=False
+2025-10-05 01:16:51 [INFO] NeuroPilot: 2025-10-05 01:16:51,984 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=right，成功=False
+2025-10-05 01:16:52 [INFO] NeuroPilot: 2025-10-05 01:16:52,487 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:16:52 [INFO] NeuroPilot: 2025-10-05 01:16:52,487 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:17:07 [INFO] NeuroPilot: 2025-10-05 01:17:07,871 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:17:07 [INFO] NeuroPilot: 2025-10-05 01:17:07,871 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:17:08 [INFO] NeuroPilot: 2025-10-05 01:17:08,892 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:17:08 [INFO] NeuroPilot: 2025-10-05 01:17:08,893 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:17:10 [INFO] NeuroPilot: 2025-10-05 01:17:10,868 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:17:10 [INFO] NeuroPilot: 2025-10-05 01:17:10,869 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:17:10 [INFO] NeuroPilot: 2025-10-05 01:17:10,869 [INFO] NeuroPilot: 开始试次投票窗口（期望：left）
+2025-10-05 01:17:10 [INFO] NeuroPilot: 2025-10-05 01:17:10,870 [INFO] NeuroPilot: 开始试次投票窗口（期望：left）
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,369 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,369 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,370 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,370 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:17:15 [INFO] NeuroPilot.Device: 2025-10-05 01:17:15,370 [INFO] NeuroPilot.Device: Auto send skipped (not success)
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,370 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=left，成功=False
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,371 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=left，成功=False
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,877 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:17:15 [INFO] NeuroPilot: 2025-10-05 01:17:15,877 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:17:19 [INFO] NeuroPilot: 2025-10-05 01:17:19,347 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:17:19 [INFO] NeuroPilot: 2025-10-05 01:17:19,347 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-05 01:17:20 [INFO] NeuroPilot: 2025-10-05 01:17:20,341 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:17:20 [INFO] NeuroPilot: 2025-10-05 01:17:20,341 [INFO] NeuroPilot: 方向提示阶段
+2025-10-05 01:17:22 [INFO] NeuroPilot: 2025-10-05 01:17:22,348 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:17:22 [INFO] NeuroPilot: 2025-10-05 01:17:22,349 [INFO] NeuroPilot: 运动想象阶段
+2025-10-05 01:17:22 [INFO] NeuroPilot: 2025-10-05 01:17:22,350 [INFO] NeuroPilot: 开始试次投票窗口（期望：right）
+2025-10-05 01:17:22 [INFO] NeuroPilot: 2025-10-05 01:17:22,350 [INFO] NeuroPilot: 开始试次投票窗口（期望：right）
+2025-10-05 01:17:26 [INFO] NeuroPilot: 2025-10-05 01:17:26,848 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:17:26 [INFO] NeuroPilot: 2025-10-05 01:17:26,848 [INFO] NeuroPilot: 休息阶段
+2025-10-05 01:17:26 [INFO] NeuroPilot: 2025-10-05 01:17:26,849 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:17:26 [INFO] NeuroPilot: 2025-10-05 01:17:26,849 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-05 01:17:26 [INFO] NeuroPilot.Device: 2025-10-05 01:17:26,849 [INFO] NeuroPilot.Device: Auto send skipped (not success)
+2025-10-05 01:17:26 [INFO] NeuroPilot: 2025-10-05 01:17:26,850 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=right，成功=False
+2025-10-05 01:17:26 [INFO] NeuroPilot: 2025-10-05 01:17:26,851 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=right，成功=False
+2025-10-05 01:17:27 [INFO] NeuroPilot: 2025-10-05 01:17:27,360 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:17:27 [INFO] NeuroPilot: 2025-10-05 01:17:27,360 [INFO] NeuroPilot: 试次结束
+2025-10-05 01:17:32 [INFO] NeuroPilot: 2025-10-05 01:17:32,381 [INFO] NeuroPilot: 连接失败：module 'serial' has no attribute 'Serial'
+2025-10-05 01:17:32 [INFO] NeuroPilot: 2025-10-05 01:17:32,382 [INFO] NeuroPilot: 连接失败：module 'serial' has no attribute 'Serial'
+2025-10-05 01:17:33 [INFO] NeuroPilot: 2025-10-05 01:17:33,827 [INFO] NeuroPilot: 连接失败：module 'serial' has no attribute 'Serial'
+2025-10-05 01:17:33 [INFO] NeuroPilot: 2025-10-05 01:17:33,828 [INFO] NeuroPilot: 连接失败：module 'serial' has no attribute 'Serial'
+2025-10-05 01:17:44 [INFO] NeuroPilot: 2025-10-05 01:17:44,989 [INFO] NeuroPilot: 通信模式切换为：WiFi
+2025-10-05 01:17:44 [INFO] NeuroPilot: 2025-10-05 01:17:44,989 [INFO] NeuroPilot: 通信模式切换为：WiFi
+2025-10-05 01:17:51 [INFO] NeuroPilot: 2025-10-05 01:17:51,314 [INFO] NeuroPilot: 连接失败：timed out
+2025-10-05 01:17:51 [INFO] NeuroPilot: 2025-10-05 01:17:51,316 [INFO] NeuroPilot: 连接失败：timed out
+2025-10-05 01:17:51 [ERROR] NeuroPilot.Device: 2025-10-05 01:17:51,317 [ERROR] NeuroPilot.Device: Connect failed: timed out

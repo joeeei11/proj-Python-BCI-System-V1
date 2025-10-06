@@ -1,0 +1,53 @@
+2025-10-02 22:31:22,170 [INFO] NeuroPilot: 系统启动完成，用户=admin
+2025-10-02 22:31:22,531 [INFO] NeuroPilot: “数据存储与分析”页已启用
+2025-10-02 22:31:22,532 [INFO] NeuroPilot: 数据分析页已启用
+2025-10-02 22:31:30,266 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-02 22:31:30,267 [INFO] NeuroPilot: 试次开始：注视点阶段
+2025-10-02 22:31:30,268 [INFO] NeuroPilot: 范式阶段变更：注视点 (idx=0)
+2025-10-02 22:31:30,269 [INFO] NeuroPilot: 记录准备：左手抓握（admin）
+2025-10-02 22:31:30,270 [INFO] NeuroPilot: 分析页：trial_started 回灌完成（目标=左手抓握）
+2025-10-02 22:31:30,274 [INFO] NeuroPilot: 循环进度：0/1
+2025-10-02 22:31:32,280 [INFO] NeuroPilot: 方向提示阶段
+2025-10-02 22:31:32,281 [INFO] NeuroPilot: 方向提示阶段
+2025-10-02 22:31:32,281 [INFO] NeuroPilot: 范式阶段变更：方向提示 (idx=1)
+2025-10-02 22:31:33,546 [INFO] NeuroPilot: 运动想象阶段
+2025-10-02 22:31:33,547 [INFO] NeuroPilot: 运动想象阶段
+2025-10-02 22:31:33,548 [INFO] NeuroPilot: 范式阶段变更：运动想象 (idx=2)
+2025-10-02 22:31:33,549 [INFO] NeuroPilot: 开始试次投票窗口（期望：left）
+2025-10-02 22:31:33,550 [INFO] NeuroPilot: 开始试次投票窗口（期望：left）
+2025-10-02 22:31:37,530 [INFO] NeuroPilot: 休息阶段
+2025-10-02 22:31:37,532 [INFO] NeuroPilot: 休息阶段
+2025-10-02 22:31:37,533 [INFO] NeuroPilot: 范式阶段变更：休息结束 (idx=3)
+2025-10-02 22:31:37,534 [INFO] NeuroPilot: 试次结果：预测=unknown 成功=False
+2025-10-02 22:31:37,535 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-02 22:31:37,536 [INFO] NeuroPilot: 自动发送：本次未成功，跳过发送
+2025-10-02 22:31:37,537 [INFO] NeuroPilot.Device: Auto send skipped (not success)
+2025-10-02 22:31:37,538 [INFO] NeuroPilot: 外设发送失败：未成功，未发送
+2025-10-02 22:31:37,539 [INFO] NeuroPilot: 保存失败：table trials has no column named ts
+2025-10-02 22:31:37,542 [INFO] NeuroPilot: 已刷新日志，共 0 条记录
+2025-10-02 22:31:37,544 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=left，成功=False
+2025-10-02 22:31:37,545 [INFO] NeuroPilot: 试次结束：预测=unknown，目标=left，成功=False
+2025-10-02 22:31:38,525 [INFO] NeuroPilot: 试次结束
+2025-10-02 22:31:38,526 [INFO] NeuroPilot: 试次结束
+2025-10-02 22:31:46,862 [INFO] NeuroPilot: 演示模式已启动
+2025-10-02 22:31:46,863 [INFO] NeuroPilot: 演示模式已启动
+2025-10-02 22:31:48,321 [INFO] NeuroPilot: 已采集左手样本 1/10
+2025-10-02 22:31:48,322 [INFO] NeuroPilot: 已采集左手样本 1/10
+2025-10-02 22:31:48,470 [INFO] NeuroPilot: 已采集左手样本 2/10
+2025-10-02 22:31:48,473 [INFO] NeuroPilot: 已采集左手样本 2/10
+2025-10-02 22:31:48,627 [INFO] NeuroPilot: 已采集左手样本 3/10
+2025-10-02 22:31:48,630 [INFO] NeuroPilot: 已采集左手样本 3/10
+2025-10-02 22:31:48,783 [INFO] NeuroPilot: 已采集左手样本 4/10
+2025-10-02 22:31:48,786 [INFO] NeuroPilot: 已采集左手样本 4/10
+2025-10-02 22:31:48,944 [INFO] NeuroPilot: 已采集左手样本 5/10
+2025-10-02 22:31:48,948 [INFO] NeuroPilot: 已采集左手样本 5/10
+2025-10-02 22:31:49,105 [INFO] NeuroPilot: 已采集左手样本 6/10
+2025-10-02 22:31:49,107 [INFO] NeuroPilot: 已采集左手样本 6/10
+2025-10-02 22:31:49,263 [INFO] NeuroPilot: 已采集左手样本 7/10
+2025-10-02 22:31:49,266 [INFO] NeuroPilot: 已采集左手样本 7/10
+2025-10-02 22:31:49,420 [INFO] NeuroPilot: 已采集左手样本 8/10
+2025-10-02 22:31:49,423 [INFO] NeuroPilot: 已采集左手样本 8/10
+2025-10-02 22:31:49,580 [INFO] NeuroPilot: 已采集左手样本 9/10
+2025-10-02 22:31:49,582 [INFO] NeuroPilot: 已采集左手样本 9/10
+2025-10-02 22:31:49,747 [INFO] NeuroPilot: 已采集左手样本 10/10
+2025-10-02 22:31:49,749 [INFO] NeuroPilot: 已采集左手样本 10/10
