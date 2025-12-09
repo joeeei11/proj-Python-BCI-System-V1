@@ -1,139 +1,99 @@
 # -*- coding: utf-8 -*-
 # data_module.py
-#
-# 数据存储与分析模块（作为一个标签页加入主窗口）
-# - 训练日志：SQLite 持久化
-# - 图表分析：学习曲线（按会话/周/月）、Welch t 检验、混淆矩阵
-# - EEG CSV 回放：多通道叠加、Butterworth 滤波、功率谱热力图（通道×频率）
-# - 接口：notify_trial_started / notify_trial_result / notify_device_send
-#
-# 稳定性处理：
-# - Figure 使用 constrained_layout=True（替代 tight_layout）
-# - 所有绘图刷新使用 draw_idle()（替代 draw()）
-# - 增加可见性判断与 50ms 去抖，避免频繁布局重排造成崩溃
-#
-# CSV 固定格式约定：
-#   time,C3,Cz,C4,CP3,CPz,CP4,...
-#   time 单位：秒（浮点），其余列为微伏值（浮点）
+# 数据存储与分析模块 (Fluent Design Phase 9.5 Visual Polish)
+# 职责：数据库交互、EEG 回放分析、训练日志可视化
+# 状态：Fixed (Icon Error Resolved)
 
 import os
 import sqlite3
-from datetime import datetime
-from collections import defaultdict
-
-import numpy as np
 import pandas as pd
-from scipy import signal
+import numpy as np
+from datetime import datetime
 from scipy.stats import ttest_ind
 from sklearn.metrics import confusion_matrix
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel, QPushButton,
-    QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QComboBox,
-    QDoubleSpinBox, QSpinBox, QCheckBox
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QFileDialog, QHeaderView, QTableWidgetItem, QSizePolicy
 )
 
-# ---- Matplotlib 画布（统一使用 constrained_layout，避免 tight_layout 导致的崩溃）----
+# --- 核心：Fluent UI 组件库 ---
+from qfluentwidgets import (
+    SmoothScrollArea, CardWidget, SimpleCardWidget, ElevatedCardWidget,
+    PrimaryPushButton, PushButton, ToolButton,
+    ComboBox, DoubleSpinBox, SpinBox, TableWidget,
+    TitleLabel, SubtitleLabel, BodyLabel, CaptionLabel, StrongBodyLabel,
+    FluentIcon as FIF, IconWidget, InfoBar, InfoBarPosition, theme
+)
+
+# --- 绘图依赖 ---
+import matplotlib
+
+# 尝试设置字体以适配 Windows UI
+matplotlib.rcParams['font.family'] = ['Segoe UI', 'Microsoft YaHei', 'Sans-serif']
+matplotlib.rcParams['font.size'] = 9
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-APPLE_BLUE = "#007AFF"
-BORDER = "#E6E6E6"
-TEXT = "#323232"
-YAHEI = QFont("Microsoft YaHei", 10, QFont.Bold)
+# --- 核心算法库 ---
+try:
+    from core import dsp
+except ImportError:
+    # 兜底：运行时应确保 core.dsp 存在
+    class dsp:
+        @staticmethod
+        def butter_filter(d, fs, l, h, order=4): return d
 
-# ============ 小工具函数 ============
+        @staticmethod
+        def notch_filter(d, fs, freq=50): return d
 
-def butter_filter(data, fs, f_low=None, f_high=None, btype='band', order=4):
-    """Butterworth 滤波封装。
-    data: ndarray (n_samples,) 或 (n_samples, n_channels)
-    fs: 采样率
-    f_low/f_high: 截止频率
-    btype: 'band'/'low'/'high'
-    """
-    if fs <= 0 or data is None:
-        return data
-    nyq = fs * 0.5
-    if btype == 'band':
-        if not f_low or not f_high or f_low <= 0 or f_high >= nyq or f_low >= f_high:
-            return data
-        Wn = [f_low / nyq, f_high / nyq]
-    elif btype == 'low':
-        if not f_high or f_high <= 0 or f_high >= nyq:
-            return data
-        Wn = f_high / nyq
-    elif btype == 'high':
-        if not f_low or f_low <= 0 or f_low >= nyq:
-            return data
-        Wn = f_low / nyq
-    else:
-        return data
-    try:
-        b, a = signal.butter(order, Wn, btype=btype)
-        return signal.filtfilt(b, a, data, axis=0)
-    except Exception:
-        return data
+        @staticmethod
+        def compute_psd(d, fs, nperseg=512, axis=0): return np.array([]), np.array([])
 
-def compute_welch_psd(x, fs, nperseg=512, noverlap=256):
-    """计算 Welch PSD（功率谱密度）。返回 f, pxx。"""
-    try:
-        f, pxx = signal.welch(x, fs=fs, nperseg=nperseg, noverlap=noverlap, axis=0)
-        return f, pxx
-    except Exception:
-        # 兜底：返回空
-        return np.array([]), np.array([])
-
-# ============ Matplotlib 画布封装（避免 tight_layout） ============
 
 class MplCanvas(FigureCanvas):
-    def __init__(self, width=8, height=5, dpi=120):
-        # 使用 constrained_layout 避免 tight_layout 在复杂场景导致的崩溃
-        fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
-        super().__init__(fig)
-        self.fig = fig
+    """Matplotlib 画布封装 (适配 Light 主题)"""
 
-# ============ 主类 ============
+    def __init__(self, width=8, height=5, dpi=100):
+        # 纯白背景 + 紧凑布局
+        self.fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
+        self.fig.patch.set_facecolor('white')
+        super().__init__(self.fig)
+
 
 class DataAnalyticsPanel(QWidget):
-    """数据存储与分析页"""
+    """
+    数据分析面板
+    包含：训练日志表格、学习曲线、EEG 波形回放、频谱分析
+    """
     info = pyqtSignal(str)
 
-    def __init__(self, db_path="data.db", parent=None):
+    def __init__(self, db_path="data/neuro_pilot.db", parent=None):
         super().__init__(parent)
-        self.setFont(YAHEI)
-        self.setStyleSheet(f"""
-            QWidget {{ background:#FFFFFF; color:{TEXT}; font-family:"Microsoft YaHei","微软雅黑",Arial; font-size:14px; }}
-            QGroupBox {{ border:1px solid {BORDER}; border-radius:12px; padding:10px; margin-top:8px; background:#FAFAFA; font-weight:bold; }}
-            QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; padding:0 6px; }}
-            QPushButton {{ background:{APPLE_BLUE}; color:#FFF; padding:8px 14px; border-radius:8px; font-weight:bold; border:none; }}
-            QPushButton:hover {{ background:#1A84FF; }} QPushButton:pressed {{ background:#0062CC; }}
-            QPushButton:disabled {{ background:#E0E0E0; color:#9E9E9E; }}
-            QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox {{ background:#FFF; border:1px solid #D0D0D0; border-radius:8px; padding:4px 8px; }}
-            QTableWidget {{ background:#FFF; border:1px solid #E0E0E0; border-radius:8px; }}
-        """)
+        self.setObjectName("DataAnalytics")
+
+        # 确保数据目录存在
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._create_tables()
+        self._check_tables()
 
-        # 待写入的一次试次（等待外设发送结果后入库）
-        self._pending_trial = {}
-
-        # EEG CSV（pandas DataFrame）
-        self._eeg_df = None
-        self._fs_hint = 250.0
-
-        # 画布与去抖
+        # 内部状态
+        self._pending_trial = {}  # 待写入缓存
+        self._eeg_df = None  # 当前加载的 EEG 数据
         self._redraw_pending = False
 
-        self._build_ui()
-        self.refresh_table()
-        self._draw_all()
+        self._init_ui()
 
-    # ---------- DB 结构 ----------
-    def _create_tables(self):
+        # 延时加载数据
+        QTimer.singleShot(500, self.refresh_table)
+        QTimer.singleShot(800, self._draw_all)
+
+    def _check_tables(self):
+        """建表 (若不存在)"""
         c = self.conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS trials (
@@ -141,97 +101,247 @@ class DataAnalyticsPanel(QWidget):
                 ts TEXT,
                 session TEXT,
                 username TEXT,
-                intended_label TEXT,   -- "左手抓握"/"右手抓握"
-                predicted TEXT,        -- "left"/"right"/NULL
-                success INTEGER,       -- 0/1/NULL
-                send_ok INTEGER,       -- 0/1/NULL
+                intended_label TEXT,
+                predicted TEXT,
+                success INTEGER,
+                send_ok INTEGER,
                 message TEXT,
                 fix_s REAL, cue_s REAL, imag_s REAL, rest_s REAL
             )
         """)
         self.conn.commit()
 
-    # ---------- UI ----------
-    def _build_ui(self):
-        # 顶部操作条
-        top_box = QGroupBox("训练日志与导出")
-        tl = QHBoxLayout()
-        self.btn_refresh = QPushButton("刷新日志")
-        self.btn_export_csv = QPushButton("导出 CSV")
-        self.btn_export_json= QPushButton("导出 JSON")
+    def _init_ui(self):
+        """构建 Fluent UI (Visual Polish)"""
+        # 1. 根布局使用 SmoothScrollArea
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.scroll_area = SmoothScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("background-color: transparent; border: none;")
+
+        self.content_widget = QWidget()
+        self.scroll_area.setWidget(self.content_widget)
+        main_layout.addWidget(self.scroll_area)
+
+        # 2. 内容布局 (增加呼吸感 Spacing=20, Margins=24)
+        self.v_layout = QVBoxLayout(self.content_widget)
+        self.v_layout.setContentsMargins(24, 24, 24, 24)
+        self.v_layout.setSpacing(20)
+
+        # ==========================================
+        # A. 顶部工具栏 (Header Card)
+        # ==========================================
+        self.header_card = SimpleCardWidget()
+        h_layout = QHBoxLayout(self.header_card)
+        h_layout.setContentsMargins(24, 16, 24, 16)
+        h_layout.setSpacing(16)
+
+        # [FIX] 使用有效的图标
+        icon = IconWidget(FIF.MARKET)
+        icon.setFixedSize(40, 40)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title_lbl = TitleLabel("训练日志与分析", self)
+        sub_lbl = CaptionLabel("查看历史训练数据、学习曲线及脑电信号回放", self)
+        sub_lbl.setTextColor(QColor(96, 96, 96), QColor(160, 160, 160))
+        title_box.addWidget(title_lbl)
+        title_box.addWidget(sub_lbl)
+
+        # 按钮组
+        self.btn_refresh = PrimaryPushButton(FIF.UPDATE, "刷新", self)
+        self.btn_export_csv = PushButton(FIF.SHARE, "导出 CSV", self)
+        self.btn_export_json = PushButton(FIF.DOCUMENT, "导出 JSON", self)
+
+        # 统一按钮宽度
+        for btn in [self.btn_refresh, self.btn_export_csv, self.btn_export_json]:
+            btn.setFixedWidth(120)
+
+        h_layout.addWidget(icon)
+        h_layout.addLayout(title_box)
+        h_layout.addStretch(1)
+        h_layout.addWidget(self.btn_refresh)
+        h_layout.addWidget(self.btn_export_csv)
+        h_layout.addWidget(self.btn_export_json)
+
         self.btn_refresh.clicked.connect(self.refresh_table)
         self.btn_export_csv.clicked.connect(self.export_csv)
         self.btn_export_json.clicked.connect(self.export_json)
-        tl.addWidget(self.btn_refresh); tl.addWidget(self.btn_export_csv); tl.addWidget(self.btn_export_json)
-        tl.addStretch(1)
-        top_box.setLayout(tl)
 
-        # 日志表
-        self.table = QTableWidget(0, 11)
-        self.table.setHorizontalHeaderLabels([
-            "时间", "会话", "用户", "意图", "预测", "成功", "外设发送", "信息",
-            "注视(s)", "提示(s)", "想象(s)"
-        ] + ["休息(s)"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setAlternatingRowColors(True)
+        self.v_layout.addWidget(self.header_card)
 
-        # 统计参数
-        stat_box = QGroupBox("统计与图表")
-        sg = QGridLayout()
-        self.cmb_curve = QComboBox(); self.cmb_curve.addItems(["按会话（日）","按周","按月"])
-        self.btn_draw = QPushButton("刷新图表")
+        # ==========================================
+        # B. 控制区 (Split Layout)
+        # ==========================================
+        # 使用 QHBoxLayout 将统计配置和 EEG 配置并排
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.setSpacing(20)
+
+        # --- B1. 统计配置 (左侧) ---
+        stat_card = CardWidget(self)
+        stat_l = QVBoxLayout(stat_card)
+        stat_l.setContentsMargins(20, 20, 20, 20)
+        stat_l.setSpacing(12)
+
+        stat_l.addWidget(StrongBodyLabel("📊 统计配置", self))
+
+        row_stat = QHBoxLayout()
+        row_stat.setSpacing(12)
+
+        self.cmb_curve = ComboBox(self)
+        self.cmb_curve.addItems(["按会话（日）", "按周聚合", "按月聚合"])
+        self.cmb_curve.setMinimumWidth(150)
+
+        self.btn_draw = PushButton(FIF.SYNC, "更新图表", self)
         self.btn_draw.clicked.connect(self._draw_all)
-        # t 检验说明
-        self.lab_ttest = QLabel("Welch t 检验：比较左右意图成功率差异（p 值）")
-        sg.addWidget(QLabel("学习曲线聚合"), 0, 0); sg.addWidget(self.cmb_curve, 0, 1)
-        sg.addWidget(self.btn_draw, 0, 2); sg.addWidget(self.lab_ttest, 0, 3, 1, 2)
-        stat_box.setLayout(sg)
 
-        # EEG 回放设置
-        eeg_box = QGroupBox("EEG CSV 回放与功率热力图")
-        eg = QGridLayout()
-        self.btn_load_csv = QPushButton("加载 EEG CSV")
+        row_stat.addWidget(CaptionLabel("聚合粒度:", self))
+        row_stat.addWidget(self.cmb_curve)
+        row_stat.addWidget(self.btn_draw)
+        stat_l.addLayout(row_stat)
+
+        # T检验标签
+        self.lab_ttest = CaptionLabel("T检验 (Welch's): 暂无数据", self)
+        self.lab_ttest.setTextColor(QColor("#009FAA"), QColor("#009FAA"))  # Teal color
+        stat_l.addWidget(self.lab_ttest)
+        stat_l.addStretch(1)  # 顶上去
+
+        ctrl_layout.addWidget(stat_card, 4)  # 权重 4
+
+        # --- B2. EEG 信号设置 (右侧) ---
+        eeg_card = CardWidget(self)
+        eeg_l = QGridLayout(eeg_card)
+        eeg_l.setContentsMargins(20, 20, 20, 20)
+        eeg_l.setVerticalSpacing(16)
+        eeg_l.setHorizontalSpacing(16)
+
+        eeg_l.addWidget(StrongBodyLabel("🧠 EEG 信号处理", self), 0, 0, 1, 4)
+
+        # Row 1
+        self.btn_load_csv = PushButton(FIF.FOLDER, "选择文件", self)
         self.btn_load_csv.clicked.connect(self._load_eeg_csv)
+        self.btn_load_csv.setFixedWidth(110)
 
-        self.spin_fs  = QDoubleSpinBox(); self.spin_fs.setRange(1, 5000); self.spin_fs.setDecimals(1); self.spin_fs.setValue(self._fs_hint)
-        self.cmb_filter = QComboBox(); self.cmb_filter.addItems(["不滤波","带通(8-30)","低通","高通","自定义带通"])
-        self.spin_f1 = QDoubleSpinBox(); self.spin_f1.setRange(0.1, 1000); self.spin_f1.setDecimals(1); self.spin_f1.setValue(8.0)
-        self.spin_f2 = QDoubleSpinBox(); self.spin_f2.setRange(0.1, 1000); self.spin_f2.setDecimals(1); self.spin_f2.setValue(30.0)
-        self.spin_down = QSpinBox(); self.spin_down.setRange(1, 50); self.spin_down.setValue(4)  # 下采样因子
-        self.btn_redraw_eeg = QPushButton("刷新EEG图")
-        self.btn_redraw_eeg.clicked.connect(self._draw_all)
+        self.spin_fs = DoubleSpinBox(self)
+        self.spin_fs.setRange(1, 2000)
+        self.spin_fs.setValue(250.0)
+        self.spin_fs.setMinimumWidth(100)
 
-        eg.addWidget(self.btn_load_csv, 0,0)
-        eg.addWidget(QLabel("采样率(Hz)"), 0,1); eg.addWidget(self.spin_fs, 0,2)
-        eg.addWidget(QLabel("滤波"), 1,0); eg.addWidget(self.cmb_filter, 1,1)
-        eg.addWidget(QLabel("f1/低通(Hz)"), 1,2); eg.addWidget(self.spin_f1, 1,3)
-        eg.addWidget(QLabel("f2/高通(Hz)"), 1,4); eg.addWidget(self.spin_f2, 1,5)
-        eg.addWidget(QLabel("下采样"), 1,6); eg.addWidget(self.spin_down, 1,7)
-        eg.addWidget(self.btn_redraw_eeg, 1,8)
-        eeg_box.setLayout(eg)
+        self.spin_down = SpinBox(self)
+        self.spin_down.setRange(1, 20)
+        self.spin_down.setValue(4)
+        self.spin_down.setMinimumWidth(80)
 
-        # 画布：四象限布局（学习曲线、混淆矩阵、EEG叠加、功率热力图）
-        self.canvas = MplCanvas(width=10, height=7, dpi=120)
-        self.ax_curve = self.canvas.fig.add_subplot(2,2,1)   # 学习曲线
-        self.ax_cm    = self.canvas.fig.add_subplot(2,2,2)   # 混淆矩阵
-        self.ax_eeg   = self.canvas.fig.add_subplot(2,2,3)   # 叠加波形
-        self.ax_spec  = self.canvas.fig.add_subplot(2,2,4)   # 频谱热力
+        eeg_l.addWidget(self.btn_load_csv, 1, 0)
+        eeg_l.addWidget(CaptionLabel("采样率(Hz):", self), 1, 1)
+        eeg_l.addWidget(self.spin_fs, 1, 2)
+        eeg_l.addWidget(CaptionLabel("下采样:", self), 1, 3)
+        eeg_l.addWidget(self.spin_down, 1, 4)
 
-        # 布局
-        root = QVBoxLayout()
-        root.addWidget(top_box)
-        root.addWidget(self.table, 2)
-        root.addWidget(stat_box)
-        root.addWidget(eeg_box)
-        root.addWidget(self.canvas, 4)
-        self.setLayout(root)
+        # Row 2
+        self.cmb_filter = ComboBox(self)
+        self.cmb_filter.addItems(["不滤波", "带通 (8-30Hz)", "低通 (<30Hz)", "高通 (>8Hz)", "自定义"])
+        self.cmb_filter.setMinimumWidth(110)
 
-    # ---------- 表格刷新/导出 ----------
+        self.spin_f1 = DoubleSpinBox(self)
+        self.spin_f1.setValue(8.0)
+        self.spin_f1.setMinimumWidth(80)
+
+        self.spin_f2 = DoubleSpinBox(self)
+        self.spin_f2.setValue(30.0)
+        self.spin_f2.setMinimumWidth(80)
+
+        eeg_l.addWidget(self.cmb_filter, 2, 0)
+        eeg_l.addWidget(CaptionLabel("低频截止:", self), 2, 1)
+        eeg_l.addWidget(self.spin_f1, 2, 2)
+        eeg_l.addWidget(CaptionLabel("高频截止:", self), 2, 3)
+        eeg_l.addWidget(self.spin_f2, 2, 4)
+
+        ctrl_layout.addWidget(eeg_card, 6)  # 权重 6
+        self.v_layout.addLayout(ctrl_layout)
+
+        # ==========================================
+        # C. 可视化画布 (Elevated Card - 视觉重心)
+        # ==========================================
+        self.chart_card = ElevatedCardWidget(self)
+        self.chart_card.setMinimumHeight(600)
+        chart_l = QVBoxLayout(self.chart_card)
+        chart_l.setContentsMargins(0, 0, 0, 0)
+
+        self.canvas = MplCanvas(width=10, height=10, dpi=100)
+        self.ax_curve = self.canvas.fig.add_subplot(2, 2, 1)
+        self.ax_cm = self.canvas.fig.add_subplot(2, 2, 2)
+        self.ax_eeg = self.canvas.fig.add_subplot(2, 2, 3)
+        self.ax_spec = self.canvas.fig.add_subplot(2, 2, 4)
+
+        chart_l.addWidget(self.canvas)
+        self.v_layout.addWidget(self.chart_card)
+
+        # ==========================================
+        # D. 数据表格 (CardWidget)
+        # ==========================================
+        self.table_card = CardWidget(self)
+        table_l = QVBoxLayout(self.table_card)
+        table_l.setContentsMargins(20, 20, 20, 20)
+        table_l.setSpacing(12)
+
+        table_header = QHBoxLayout()
+        table_title = StrongBodyLabel("📋 最近试次记录", self)
+        table_header.addWidget(table_title)
+        table_header.addStretch(1)
+        table_l.addLayout(table_header)
+
+        self.table = TableWidget(self)
+        self.table.setBorderVisible(True)
+        self.table.setBorderRadius(8)
+        self.table.setWordWrap(False)
+        self.table.setColumnCount(12)
+        headers = [
+            "时间", "会话", "用户", "意图", "预测", "成功", "发送", "信息",
+            "注视(s)", "提示(s)", "想象(s)", "休息(s)"
+        ]
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setMinimumHeight(280)
+
+        table_l.addWidget(self.table)
+        self.v_layout.addWidget(self.table_card)
+
+    # ======================================================
+    # 辅助功能：Matplotlib 风格化
+    # ======================================================
+    def _style_axis(self, ax, title=""):
+        """统一设置图表风格：去边框、柔和网格、深灰字体"""
+        ax.set_title(title, fontsize=10, fontweight='bold', color='#333333', pad=10)
+
+        # 去除顶部和右侧边框
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        # 柔和的坐标轴颜色
+        ax.spines['left'].set_color('#E0E0E0')
+        ax.spines['bottom'].set_color('#E0E0E0')
+
+        # 字体颜色
+        ax.tick_params(axis='x', colors='#606060', labelsize=8)
+        ax.tick_params(axis='y', colors='#606060', labelsize=8)
+        ax.yaxis.label.set_color('#606060')
+        ax.xaxis.label.set_color('#606060')
+
+        # 虚线网格
+        ax.grid(True, linestyle='--', alpha=0.3, color='#C0C0C0')
+
+    # ======================================================
+    # 业务逻辑
+    # ======================================================
+
     def refresh_table(self):
         df = self._read_df()
         self._fill_table(df)
-        self.info.emit(f"已刷新日志，共 {len(df)} 条记录")
-        # 刷新图表（去抖）
+        self.info.emit(f"数据已刷新: 共 {len(df)} 条")
         self._debounced_draw()
 
     def export_csv(self):
@@ -240,9 +350,9 @@ class DataAnalyticsPanel(QWidget):
         df = self._read_df()
         try:
             df.to_csv(path, index=False, encoding="utf-8-sig")
-            self.info.emit(f"导出 CSV 成功：{path}")
+            self._show_msg("导出成功", f"已保存至 {path}", success=True)
         except Exception as e:
-            self.info.emit(f"导出 CSV 失败：{e}")
+            self._show_msg("导出失败", str(e), success=False)
 
     def export_json(self):
         path, _ = QFileDialog.getSaveFileName(self, "导出 JSON", "trials.json", "JSON Files (*.json)")
@@ -250,304 +360,285 @@ class DataAnalyticsPanel(QWidget):
         df = self._read_df()
         try:
             df.to_json(path, orient="records", force_ascii=False, indent=2)
-            self.info.emit(f"导出 JSON 成功：{path}")
+            self._show_msg("导出成功", f"已保存至 {path}", success=True)
         except Exception as e:
-            self.info.emit(f"导出 JSON 失败：{e}")
+            self._show_msg("导出失败", str(e), success=False)
+
+    def _show_msg(self, title, content, success=True):
+        self.info.emit(f"{title}: {content}")
+        if success:
+            InfoBar.success(
+                title=title, content=content,
+                orient=Qt.Horizontal, isClosable=True, position=InfoBarPosition.TOP_RIGHT,
+                duration=2000, parent=self
+            )
+        else:
+            InfoBar.error(
+                title=title, content=content,
+                orient=Qt.Horizontal, isClosable=True, position=InfoBarPosition.TOP_RIGHT,
+                duration=2000, parent=self
+            )
 
     def _read_df(self):
         try:
             df = pd.read_sql_query("SELECT * FROM trials ORDER BY id DESC", self.conn)
         except Exception:
-            df = pd.DataFrame(columns=[
-                "ts","session","username","intended_label","predicted","success",
-                "send_ok","message","fix_s","cue_s","imag_s","rest_s"
-            ])
+            cols = ["ts", "session", "username", "intended_label", "predicted", "success",
+                    "send_ok", "message", "fix_s", "cue_s", "imag_s", "rest_s"]
+            df = pd.DataFrame(columns=cols)
         return df
 
     def _fill_table(self, df: pd.DataFrame):
         self.table.setRowCount(0)
-        if df is None or df.empty:
-            return
-        cols = ["ts","session","username","intended_label","predicted","success","send_ok","message","fix_s","cue_s","imag_s","rest_s"]
-        for _, row in df.iterrows():
-            r = self.table.rowCount()
-            self.table.insertRow(r)
-            for c, key in enumerate(cols):
-                val = row.get(key, "")
-                if key in ("success","send_ok"):
-                    val = "是" if int(val)==1 else ("否" if pd.notna(val) else "")
+        if df is None or df.empty: return
+
+        # 字段兼容
+        cols_map = {
+            "时间": "ts" if "ts" in df.columns else "timestamp",
+            "会话": "session" if "session" in df.columns else "session_id",
+            "用户": "username" if "username" in df.columns else "subject_name",
+            "意图": "intended_label",
+            "预测": "predicted" if "predicted" in df.columns else "predicted_label",
+            "成功": "success" if "success" in df.columns else "is_success",
+            "发送": "send_ok" if "send_ok" in df.columns else "send_status",
+            "信息": "message" if "message" in df.columns else "device_msg",
+            "注视": "fix_s" if "fix_s" in df.columns else "fix_duration",
+            "提示": "cue_s" if "cue_s" in df.columns else "cue_duration",
+            "想象": "imag_s" if "imag_s" in df.columns else "imag_duration",
+            "休息": "rest_s" if "rest_s" in df.columns else "rest_duration"
+        }
+
+        headers = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
+
+        self.table.setRowCount(len(df))
+        for r, (_, row) in enumerate(df.iterrows()):
+            for c, key in enumerate(headers):
+                col_name = cols_map.get(key, "")
+                val = row.get(col_name, "")
+                # 格式化
+                if key in ["成功", "发送"]:
+                    try:
+                        v_int = int(val)
+                        val = "是" if v_int == 1 else "否"
+                    except:
+                        pass
+                elif pd.isna(val):
+                    val = ""
                 item = QTableWidgetItem(str(val))
                 item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(r, c, item)
 
-    # ---------- 回灌接口 ----------
-    def notify_trial_started(self, username: str, intended_label: str,
-                              fix_s: float, cue_s: float, imag_s: float, rest_s: float):
-        """在“注视点”阶段由主程序调用，缓存一次试次，等待预测与外设发送后落库"""
+    # --- 数据回灌 ---
+    def notify_trial_started(self, username, intended, fix, cue, imag, rest):
         self._pending_trial = dict(
             ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             session=datetime.now().strftime("%Y-%m-%d"),
             username=username,
-            intended_label=intended_label,
+            intended_label=intended,
             predicted=None, success=None, send_ok=None, message=None,
-            fix_s=float(fix_s), cue_s=float(cue_s), imag_s=float(imag_s), rest_s=float(rest_s)
+            fix_s=float(fix), cue_s=float(cue), imag_s=float(imag), rest_s=float(rest)
         )
-        self.info.emit(f"记录准备：{intended_label}（{username}）")
 
-    def notify_trial_result(self, predicted: str, success: bool):
-        """EEG 模块给出预测后，由主程序调用"""
-        if not self._pending_trial:
-            # 没有 pending，创建临时记录（等待发送结果入库）
-            self._pending_trial = dict(
-                ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                session=datetime.now().strftime("%Y-%m-%d"),
-                username="未命名用户", intended_label="未知",
-                predicted=predicted, success=bool(success),
-                send_ok=None, message=None, fix_s=None, cue_s=None, imag_s=None, rest_s=None
-            )
-        else:
-            self._pending_trial["predicted"] = predicted
-            self._pending_trial["success"] = bool(success)
+    def notify_trial_result(self, predicted, success):
+        if not self._pending_trial: return
+        self._pending_trial["predicted"] = predicted
+        self._pending_trial["success"] = 1 if success else 0
 
-    def notify_device_send(self, send_ok: bool, message: str):
-        """外设发送完成后，由主程序调用；此时真正入库并刷新表格与图表"""
-        # 若还没有 pending，也可以单独落库
-        if not self._pending_trial:
-            self._pending_trial = dict(
-                ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                session=datetime.now().strftime("%Y-%m-%d"),
-                username="未命名用户", intended_label="未知",
-                predicted=None, success=None,
-                fix_s=None, cue_s=None, imag_s=None, rest_s=None
-            )
-        self._pending_trial["send_ok"] = bool(send_ok)
+    def notify_device_send(self, send_ok, message):
+        if not self._pending_trial: return
+        self._pending_trial["send_ok"] = 1 if send_ok else 0
         self._pending_trial["message"] = str(message)
 
+        # 写入 DB
         try:
+            keys = list(self._pending_trial.keys())
+            vals = list(self._pending_trial.values())
+            placeholders = ",".join(["?"] * len(keys))
+            columns = ",".join(keys)
+
+            sql = f"INSERT INTO trials ({columns}) VALUES ({placeholders})"
             c = self.conn.cursor()
-            c.execute("""
-                INSERT INTO trials
-                (ts, session, username, intended_label, predicted, success, send_ok, message,
-                 fix_s, cue_s, imag_s, rest_s)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                self._pending_trial.get("ts"),
-                self._pending_trial.get("session"),
-                self._pending_trial.get("username"),
-                self._pending_trial.get("intended_label"),
-                self._pending_trial.get("predicted"),
-                int(self._pending_trial["success"]) if self._pending_trial.get("success") is not None else None,
-                int(self._pending_trial["send_ok"]) if self._pending_trial.get("send_ok") is not None else None,
-                self._pending_trial.get("message"),
-                self._pending_trial.get("fix_s"),
-                self._pending_trial.get("cue_s"),
-                self._pending_trial.get("imag_s"),
-                self._pending_trial.get("rest_s"),
-            ))
+            c.execute(sql, vals)
             self.conn.commit()
-            self.info.emit("训练记录已保存")
+            self.info.emit("记录已保存")
         except Exception as e:
-            self.info.emit(f"保存失败：{e}")
+            self.info.emit(f"保存失败: {e}")
         finally:
             self._pending_trial = {}
-            self.refresh_table()  # 刷表 & 去抖绘图
+            self.refresh_table()
 
-    # ---------- 图表绘制 ----------
+    # --- 绘图 (Visual Polish) ---
     def _debounced_draw(self):
-        if self._redraw_pending:
-            return
+        if self._redraw_pending: return
         self._redraw_pending = True
-        QTimer.singleShot(50, self._draw_all)
+        QTimer.singleShot(200, self._draw_all)
 
     def _draw_all(self):
-        # 不可见或未初始化时直接返回（避免隐藏状态下多次重排）
-        if not self.isVisible() or not hasattr(self, "canvas"):
-            self._redraw_pending = False
-            return
+        self._redraw_pending = False
+        if not self.isVisible(): return
+
+        for ax in [self.ax_curve, self.ax_cm, self.ax_eeg, self.ax_spec]:
+            ax.clear()
 
         df = self._read_df()
-        # 清理子图
-        self.ax_curve.clear(); self.ax_cm.clear(); self.ax_eeg.clear(); self.ax_spec.clear()
 
-        # 1) 学习曲线（按日/周/月聚合的成功率）
-        if df is not None and not df.empty:
-            try:
-                df_ok = df.copy()
-                # success 统一到 {0,1}
-                if "success" in df_ok.columns:
-                    df_ok["success"] = df_ok["success"].apply(lambda x: np.nan if pd.isna(x) else int(x))
-                # 时间列
-                df_ok["ts"] = pd.to_datetime(df_ok["ts"], errors="coerce")
-                df_ok["session"] = pd.to_datetime(df_ok["session"], errors="coerce").dt.date
+        # 1. 学习曲线
+        self._plot_learning_curve(df)
+        # 2. 统计
+        self._plot_stats(df)
+        # 3. EEG
+        self._draw_eeg_visuals()
 
-                agg_mode = self.cmb_curve.currentIndex()  # 0日 1周 2月
-                if agg_mode == 0:
-                    grp = df_ok.groupby(df_ok["session"])
-                elif agg_mode == 1:
-                    grp = df_ok.groupby(df_ok["ts"].dt.to_period("W").apply(lambda p: p.start_time.date()))
-                else:
-                    grp = df_ok.groupby(df_ok["ts"].dt.to_period("M").apply(lambda p: p.start_time.date()))
+        self.canvas.draw_idle()
 
-                curve_x, curve_y = [], []
-                for k, g in grp:
-                    s = g["success"].dropna()
-                    if len(s) == 0:
-                        continue
-                    curve_x.append(k)
-                    curve_y.append(float(np.mean(s)))
-                if curve_x:
-                    self.ax_curve.plot(curve_x, curve_y, marker="o", color="#007AFF", linewidth=2)
-                    self.ax_curve.set_ylim(0, 1)
-                    self.ax_curve.set_ylabel("成功率")
-                    self.ax_curve.set_title("学习曲线（0~1）")
-                    self.ax_curve.grid(True, alpha=0.3)
-            except Exception as e:
-                self.ax_curve.text(0.5, 0.5, f"学习曲线绘制失败：{e}", ha="center", va="center", transform=self.ax_curve.transAxes)
+    def _plot_learning_curve(self, df):
+        self._style_axis(self.ax_curve, "Learning Curve (Accuracy)")
 
-            # 2) Welch t 检验（左右意图成功率差异）
-            try:
-                left_s = df_ok[df_ok["intended_label"].astype(str).str.contains("左")]["success"].dropna().astype(int)
-                right_s= df_ok[df_ok["intended_label"].astype(str).str.contains("右")]["success"].dropna().astype(int)
-                if len(left_s) >= 2 and len(right_s) >= 2:
-                    tstat, pval = ttest_ind(left_s, right_s, equal_var=False)
-                    self.lab_ttest.setText(f"Welch t 检验：p = {pval:.4f}（n_left={len(left_s)}，n_right={len(right_s)}）")
-                else:
-                    self.lab_ttest.setText("Welch t 检验：样本不足（左右各≥2条）")
-            except Exception as e:
-                self.lab_ttest.setText(f"Welch t 检验失败：{e}")
-
-            # 3) 混淆矩阵
-            try:
-                cm = None
-                if "predicted" in df_ok.columns and "intended_label" in df_ok.columns:
-                    y_true = df_ok["intended_label"].map(lambda s: "left" if isinstance(s, str) and "左" in s else ("right" if isinstance(s,str) and "右" in s else None))
-                    y_pred = df_ok["predicted"]
-                    mask = y_true.notna() & y_pred.notna()
-                    y_true = y_true[mask]; y_pred = y_pred[mask]
-                    if len(y_true) > 0:
-                        labels = ["left","right"]
-                        cm = confusion_matrix(y_true, y_pred, labels=labels)
-                        im = self.ax_cm.imshow(cm, cmap="Blues")
-                        for i in range(cm.shape[0]):
-                            for j in range(cm.shape[1]):
-                                self.ax_cm.text(j, i, str(cm[i, j]), ha="center", va="center", color="black")
-                        self.ax_cm.set_xticks([0,1]); self.ax_cm.set_xticklabels(["左","右"])
-                        self.ax_cm.set_yticks([0,1]); self.ax_cm.set_yticklabels(["左","右"])
-                        self.ax_cm.set_xlabel("预测"); self.ax_cm.set_ylabel("真实意图")
-                        self.ax_cm.set_title("混淆矩阵")
-                        self.ax_cm.figure.colorbar(im, ax=self.ax_cm, fraction=0.046, pad=0.04)
-            except Exception as e:
-                self.ax_cm.text(0.5, 0.5, f"混淆矩阵失败：{e}", ha="center", va="center", transform=self.ax_cm.transAxes)
-        else:
-            self.ax_curve.text(0.5, 0.5, "暂无数据", ha="center", va="center", transform=self.ax_curve.transAxes)
-            self.lab_ttest.setText("Welch t 检验：暂无数据")
-            self.ax_cm.text(0.5, 0.5, "暂无数据", ha="center", va="center", transform=self.ax_cm.transAxes)
-
-        # 4) EEG 叠加与功率热力
-        self._draw_eeg_and_spec()
-
-        # 异步刷新并清除去抖标志
-        try:
-            self.canvas.draw_idle()
-        except Exception:
-            pass
-        self._redraw_pending = False
-
-    # ---------- EEG 绘制 ----------
-    def _load_eeg_csv(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择 EEG CSV", "", "CSV Files (*.csv)")
-        if not path:
+        if df is None or df.empty or "success" not in df.columns:
+            self.ax_curve.text(0.5, 0.5, "No Data", ha='center', color='#999999')
             return
+
         try:
-            df = pd.read_csv(path)
-            if "time" not in df.columns:
-                raise ValueError("CSV 必须包含 'time' 列（秒）")
-            # 估计采样率
-            t = df["time"].values
-            if len(t) >= 2:
-                dt = np.diff(t)
-                fs_est = 1.0 / np.median(dt[dt>0])
-                if np.isfinite(fs_est) and fs_est > 1:
-                    self.spin_fs.setValue(float(fs_est))
-            self._eeg_df = df
-            self.info.emit(f"已加载 EEG CSV：{os.path.basename(path)}，形状 {df.shape}")
-            self._draw_all()
+            df_ok = df.copy()
+            ts_col = "ts" if "ts" in df_ok.columns else "timestamp"
+            df_ok[ts_col] = pd.to_datetime(df_ok[ts_col], errors='coerce')
+            df_ok["success"] = pd.to_numeric(df_ok["success"], errors='coerce').fillna(0)
+
+            idx = self.cmb_curve.currentIndex()
+            if idx == 0:
+                grp = df_ok.groupby("session" if "session" in df_ok.columns else "session_id")
+            elif idx == 1:
+                grp = df_ok.groupby(df_ok[ts_col].dt.to_period("W").dt.start_time)
+            else:
+                grp = df_ok.groupby(df_ok[ts_col].dt.to_period("M").dt.start_time)
+
+            x_vals, y_vals = [], []
+            for k, g in grp:
+                if len(g) > 0:
+                    x_vals.append(str(k)[:10])
+                    y_vals.append(g["success"].mean())
+
+            if x_vals:
+                # 使用现代的蓝色 (#009FAA)
+                self.ax_curve.plot(x_vals, y_vals, marker="o", color="#009FAA", linewidth=2.5, markersize=6)
+                self.ax_curve.fill_between(x_vals, y_vals, alpha=0.1, color="#009FAA")
+                self.ax_curve.set_ylim(0, 1.1)
+                self.ax_curve.tick_params(axis='x', rotation=30)
         except Exception as e:
-            self.info.emit(f"加载失败：{e}")
+            self.ax_curve.text(0.5, 0.5, f"Err: {e}", ha='center', fontsize=8)
 
-    def _draw_eeg_and_spec(self):
-        ax1, ax2 = self.ax_eeg, self.ax_spec
-        ax1.clear(); ax2.clear()
-        if self._eeg_df is None or self._eeg_df.empty:
-            ax1.text(0.5, 0.5, "未加载 EEG CSV", ha="center", va="center", transform=ax1.transAxes)
-            ax2.text(0.5, 0.5, "未加载 EEG CSV", ha="center", va="center", transform=ax2.transAxes)
-            return
+    def _plot_stats(self, df):
+        self._style_axis(self.ax_cm, "Confusion Matrix")
 
-        df = self._eeg_df.copy()
-        time = df["time"].values
-        ch_names = [c for c in df.columns if c != "time"]
-        if not ch_names:
-            ax1.text(0.5, 0.5, "CSV 未找到通道列", ha="center", va="center", transform=ax1.transAxes)
-            ax2.text(0.5, 0.5, "CSV 未找到通道列", ha="center", va="center", transform=ax2.transAxes)
-            return
+        if df is None or df.empty: return
 
-        X = df[ch_names].values
-        fs = float(self.spin_fs.value())
-        # 下采样
-        ds = max(1, int(self.spin_down.value()))
-        time_ds = time[::ds]
-        X_ds = X[::ds, :]
-
-        # 滤波
-        fmode = self.cmb_filter.currentText()
-        f1 = float(self.spin_f1.value())
-        f2 = float(self.spin_f2.value())
-        if fmode == "带通(8-30)":
-            X_ds = butter_filter(X_ds, fs/ds, 8.0, 30.0, btype='band')
-        elif fmode == "低通":
-            X_ds = butter_filter(X_ds, fs/ds, None, f2, btype='low')
-        elif fmode == "高通":
-            X_ds = butter_filter(X_ds, fs/ds, f1, None, btype='high')
-        elif fmode == "自定义带通":
-            X_ds = butter_filter(X_ds, fs/ds, f1, f2, btype='band')
-
-        # 叠加绘图（通道间加入偏置，避免压在一起）
-        offset = 0.0
-        for i, name in enumerate(ch_names):
-            y = X_ds[:, i]
-            ax1.plot(time_ds, y + offset, linewidth=0.8)
-            # 根据通道幅值动态偏置
-            offset += max(1.0, np.nanmax(np.abs(y)) * 1.2 + 10.0)
-        ax1.set_xlabel("时间 (s)")
-        ax1.set_ylabel("电位 (μV) [已叠加偏置]")
-        ax1.set_title(f"EEG 多通道叠加（共 {len(ch_names)} 通道）")
-        ax1.grid(True, alpha=0.2)
-
-        # 功率谱热力（频道×频率）
-        # 计算 Welch PSD
-        f, pxx = compute_welch_psd(X, fs=fs, nperseg=min(2048, len(X)), noverlap=None)
-        if f.size == 0:
-            ax2.text(0.5,0.5,"PSD 计算失败", ha="center", va="center", transform=ax2.transAxes)
-            return
-        # 选择 4~40Hz 范围
-        fmin, fmax = 4.0, 40.0
-        idx = (f >= fmin) & (f <= fmax)
-        f_sel = f[idx]
-        pxx_sel = pxx[idx, :]    # shape: [freq, ch]
-        # 转 dB
-        pxx_db = 10*np.log10(np.maximum(pxx_sel, 1e-12))
-        im = ax2.imshow(pxx_db.T, aspect='auto', origin='lower',
-                        extent=[f_sel[0], f_sel[-1], 0, len(ch_names)], cmap="viridis")
-        ax2.set_yticks(np.arange(len(ch_names)) + 0.5)
-        ax2.set_yticklabels(ch_names)
-        ax2.set_xlabel("频率 (Hz)"); ax2.set_ylabel("通道")
-        ax2.set_title("功率谱热力图（4–40 Hz, dB）")
-        self.canvas.fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
-
-    # ---------- 关闭处理 ----------
-    def closeEvent(self, e):
+        # T-Test
         try:
-            self.conn.close()
-        except Exception:
+            col_intent = "intended_label"
+            col_succ = "success"
+            lefts = df[df[col_intent].astype(str).str.contains("左|Left", na=False)][col_succ]
+            rights = df[df[col_intent].astype(str).str.contains("右|Right", na=False)][col_succ]
+            lefts = pd.to_numeric(lefts, errors='coerce')
+            rights = pd.to_numeric(rights, errors='coerce')
+
+            if len(lefts) > 1 and len(rights) > 1:
+                res = ttest_ind(lefts, rights, equal_var=False)
+                self.lab_ttest.setText(f"Welch t-test: p={res.pvalue:.4f}")
+            else:
+                self.lab_ttest.setText("T检验: 样本不足")
+        except:
             pass
+
+        # Confusion Matrix
+        try:
+            y_true = df["intended_label"].map(lambda x: 0 if "左" in str(x) or "Left" in str(x) else 1)
+            col_pred = "predicted" if "predicted" in df.columns else "predicted_label"
+            y_pred = df[col_pred].map(
+                lambda x: 0 if "left" in str(x).lower() else (1 if "right" in str(x).lower() else -1))
+            mask = (y_pred != -1)
+            if mask.any():
+                cm = confusion_matrix(y_true[mask], y_pred[mask], labels=[0, 1])
+                # 使用 GnBu 渐变色
+                self.ax_cm.imshow(cm, cmap="GnBu")
+                for i in range(cm.shape[0]):
+                    for j in range(cm.shape[1]):
+                        self.ax_cm.text(j, i, str(cm[i, j]), ha="center", va="center", color='#333333',
+                                        fontweight='bold')
+                self.ax_cm.set_xticks([0, 1]);
+                self.ax_cm.set_xticklabels(["L", "R"])
+                self.ax_cm.set_yticks([0, 1]);
+                self.ax_cm.set_yticklabels(["L", "R"])
+        except:
+            pass
+
+    def _load_eeg_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 CSV", "", "CSV (*.csv)")
+        if path:
+            try:
+                self._eeg_df = pd.read_csv(path)
+                self.info.emit(f"已加载: {os.path.basename(path)}")
+                self._draw_all()
+            except Exception as e:
+                self.info.emit(f"加载失败: {e}")
+
+    def _draw_eeg_visuals(self):
+        self._style_axis(self.ax_eeg, "EEG Waveforms")
+        self._style_axis(self.ax_spec, "PSD (dB)")
+
+        if self._eeg_df is None:
+            self.ax_eeg.text(0.5, 0.5, "No EEG Loaded", ha='center', color='#999999')
+            self.ax_spec.text(0.5, 0.5, "No Data", ha='center', color='#999999')
+            return
+
+        cols = [c for c in self._eeg_df.columns if 'time' not in c.lower()]
+        if not cols: return
+
+        data = self._eeg_df[cols].values
+        fs = self.spin_fs.value()
+
+        # Filter
+        f_mode = self.cmb_filter.currentText()
+        if "带通" in f_mode or "自定义" in f_mode:
+            low = 8.0 if "自定义" not in f_mode else self.spin_f1.value()
+            high = 30.0 if "自定义" not in f_mode else self.spin_f2.value()
+            data = dsp.butter_filter(data, fs, low, high, order=4)
+        elif "低通" in f_mode:
+            data = dsp.butter_filter(data, fs, None, self.spin_f2.value())
+        elif "高通" in f_mode:
+            data = dsp.butter_filter(data, fs, self.spin_f1.value(), None)
+
+        ds = int(self.spin_down.value())
+        data_ds = data[::ds]
+        t = np.arange(len(data_ds)) / (fs / ds)
+
+        offset = 0
+        # 现代配色盘
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEEAD', '#D4A5A5', '#9B59B6', '#3498DB']
+
+        for i, col in enumerate(cols):
+            y = data_ds[:, i]
+            amp = np.percentile(np.abs(y), 95) * 2.0
+            if amp < 1: amp = 10
+
+            c = colors[i % len(colors)]
+            self.ax_eeg.plot(t, y + offset, lw=0.8, color=c, alpha=0.9)
+            self.ax_eeg.text(t[0], offset, col, fontsize=8, ha='right', va='center', color='#606060')
+            offset += amp
+
+        # PSD
+        f, pxx = dsp.compute_psd(data, fs=fs, nperseg=512, axis=0)
+        if len(f) > 0:
+            idx = (f >= 4) & (f <= 40)
+            f_sel = f[idx]
+            pxx_sel = pxx[idx, :].T
+            im = self.ax_spec.imshow(10 * np.log10(pxx_sel + 1e-9), aspect='auto',
+                                     extent=[f_sel[0], f_sel[-1], 0, len(cols)],
+                                     origin='lower', cmap='viridis')  # Viridis is good
+            self.ax_spec.set_yticks(np.arange(len(cols)) + 0.5)
+            self.ax_spec.set_yticklabels(cols)
+            self.canvas.fig.colorbar(im, ax=self.ax_spec, fraction=0.046, pad=0.04)
+
+    def closeEvent(self, e):
+        if self.conn:
+            self.conn.close()
         super().closeEvent(e)

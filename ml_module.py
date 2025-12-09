@@ -1,16 +1,8 @@
 # -*- coding: utf-8 -*-
 # ml_module.py
-#
-# 模型训练与优化（最小侵入版）—— 支持：
-# 1) 离线训练 + 网格搜索 + 交叉验证 + 可视化（混淆矩阵 / ROC）
-# 2) 可选：学习曲线（Learning Curve）
-# 3) 可选：特征选择（SelectKBest / PCA）
-# 4) 可选：批量对比实验（SVM-RBF / SVM-Linear / KNN / LR / RF）
-#
-# - 不修改 EEG/范式/外设 既有逻辑，仅作为新增标签页
-# - 数据来源：CSV（特征表，含 label 列）或 生成演示数据
-# - 算法：全部 scikit-learn；不引入 TensorFlow
-# - 与主程序联动：在 main.py 中实例化 MLTrainerPanel() 加为一个 tab，将 info 信号接入状态栏与日志
+# 模型训练与优化 (Fluent Design + Config Persistence)
+# 职责：离线训练、网格搜索、交叉验证、模型对比
+# 状态：Final Release
 
 import os
 import io
@@ -18,29 +10,37 @@ import pickle
 import logging
 import numpy as np
 
-# 允许没有 pandas 时给出更明确提示（多数环境已装）
 try:
     import pandas as pd
-except Exception as _e:
+except Exception:
     pd = None
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel,
-    QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, QLineEdit, QTextEdit,
-    QFileDialog, QMessageBox, QCheckBox
+    QWidget, QVBoxLayout, QHBoxLayout, QFileDialog
 )
 
-# Matplotlib 嵌入
+# --- Fluent Widgets ---
+from qfluentwidgets import (
+    SmoothScrollArea, CardWidget, SimpleCardWidget, ElevatedCardWidget,
+    PrimaryPushButton, PushButton, CheckBox,
+    ComboBox, DoubleSpinBox, SpinBox, LineEdit, TextEdit,
+    TitleLabel, CaptionLabel, StrongBodyLabel, BodyLabel,
+    FluentIcon as FIF, IconWidget, InfoBar, InfoBarPosition
+)
+
+# --- Config Manager (Phase 12) ---
+from core.config_manager import cfg
+
+# --- Matplotlib ---
 import matplotlib
-# 尽量用微软雅黑，减少中文缺字警告
-matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial"]
+
+matplotlib.rcParams["font.sans-serif"] = ["Segoe UI", "Microsoft YaHei", "Arial"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-# scikit-learn
+# --- Scikit-learn ---
 from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, learning_curve
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 from sklearn.preprocessing import StandardScaler
@@ -52,16 +52,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.decomposition import PCA
 
-APPLE_BLUE = "#007AFF"
-DARK_TEXT = "#323232"
-
 
 def _parse_param_grid(grid_text: str):
-    """
-    解析简易网格字符串 -> dict
-    输入示例： "C=0.1,1,10; gamma=scale,auto"
-    返回：{"C":[0.1,1,10], "gamma":["scale","auto"]}
-    """
+    """解析简易网格字符串 -> dict"""
     grid = {}
     if not grid_text or not grid_text.strip():
         return grid
@@ -75,15 +68,13 @@ def _parse_param_grid(grid_text: str):
         vals = []
         for token in v.split(","):
             token = token.strip()
-            if token == "":
-                continue
-            # 数字自动转型
+            if token == "": continue
             try:
                 if "." in token:
                     vals.append(float(token))
                 else:
                     vals.append(int(token))
-            except Exception:
+            except:
                 vals.append(token)
         if vals:
             grid[k] = vals
@@ -92,145 +83,287 @@ def _parse_param_grid(grid_text: str):
 
 class MplCanvas(FigureCanvas):
     """
-    2x2 子图：
-    [0,0] 混淆矩阵    [0,1] ROC
-    [1,0] 学习曲线    [1,1] 批量对比
+    2x2 子图画布，适配 Fluent Light 主题
     """
-    def __init__(self, width=9.5, height=6.8, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi, tight_layout=True)
-        self.ax_cm = fig.add_subplot(2, 2, 1)
-        self.ax_roc = fig.add_subplot(2, 2, 2)
-        self.ax_lc = fig.add_subplot(2, 2, 3)
-        self.ax_cmp = fig.add_subplot(2, 2, 4)
-        super().__init__(fig)
+
+    def __init__(self, width=10, height=8, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
+        self.fig.patch.set_facecolor('white')
+
+        self.ax_cm = self.fig.add_subplot(2, 2, 1)
+        self.ax_roc = self.fig.add_subplot(2, 2, 2)
+        self.ax_lc = self.fig.add_subplot(2, 2, 3)
+        self.ax_cmp = self.fig.add_subplot(2, 2, 4)
+
+        super().__init__(self.fig)
 
 
 class MLTrainerPanel(QWidget):
     """
     模型训练与优化面板
-    - 对外信号：info(str)
     """
     info = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.setObjectName("MLTrainer")
         self._log = logging.getLogger("NeuroPilot.ML")
 
-        self.df = None   # pandas DataFrame
-        self.X = None    # np.ndarray (n_samples, n_features)
-        self.y = None    # np.ndarray (n_samples,)
+        self.df = None
+        self.X = None
+        self.y = None
         self.classes_ = None
-        self.model = None  # 训练好的 sklearn Pipeline
-        self._last_split = None  # (Xtr, Xte, ytr, yte)
+        self.model = None
+        self._last_split = None
 
-        self._build_ui()
-        self._apply_styles()
+        self._init_ui()
 
-    # ---------------- UI 搭建 ----------------
-    def _build_ui(self):
-        # —— 数据源区 ——
-        box_data = QGroupBox("数据源")
-        g = QGridLayout()
-        self.btn_load_csv = QPushButton("导入 CSV")
-        self.btn_demo = QPushButton("生成演示数据")
-        self.ed_target = QLineEdit("label")
-        self.ed_features = QLineEdit("")  # 留空=自动：除目标列外全部为特征
-        self.split_spin = QDoubleSpinBox(); self.split_spin.setRange(0.1, 0.9); self.split_spin.setSingleStep(0.05); self.split_spin.setValue(0.2)
-        self.btn_preview = QPushButton("预览/检查")
-        r = 0
-        g.addWidget(QLabel("目标列"), r, 0); g.addWidget(self.ed_target, r, 1); r += 1
-        g.addWidget(QLabel("特征列（逗号分隔，空=自动）"), r, 0); g.addWidget(self.ed_features, r, 1, 1, 3); r += 1
-        g.addWidget(QLabel("测试集比例"), r, 0); g.addWidget(self.split_spin, r, 1)
-        g.addWidget(self.btn_load_csv, r, 2); g.addWidget(self.btn_demo, r, 3); r += 1
-        g.addWidget(self.btn_preview, r, 0, 1, 4)
-        box_data.setLayout(g)
+        # 核心：加载上次配置
+        self._load_settings()
 
-        # —— 算法与参数区 ——
-        box_algo = QGroupBox("算法与参数")
-        ag = QGridLayout()
-        self.cmb_algo = QComboBox()
-        self.cmb_algo.addItems(["SVM (RBF)", "SVM (Linear)", "KNN", "LogisticRegression", "RandomForest", "深度学习（占位，禁用）"])
-        self.cmb_algo.setCurrentIndex(0)
+    def _init_ui(self):
+        # 1. 根布局：SmoothScrollArea
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.scroll_area = SmoothScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("background-color: transparent; border: none;")
+
+        self.content_widget = QWidget()
+        self.scroll_area.setWidget(self.content_widget)
+        main_layout.addWidget(self.scroll_area)
+
+        # 2. 内容布局
+        self.v_layout = QVBoxLayout(self.content_widget)
+        self.v_layout.setContentsMargins(24, 24, 24, 24)
+        self.v_layout.setSpacing(20)
+
+        # ==========================================
+        # Header
+        # ==========================================
+        self.header = SimpleCardWidget()
+        h_header = QHBoxLayout(self.header)
+        h_header.setContentsMargins(24, 16, 24, 16)
+
+        icon = IconWidget(FIF.EDUCATION)
+        icon.setFixedSize(40, 40)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title_box.addWidget(TitleLabel("机器学习模型训练", self))
+        title_box.addWidget(CaptionLabel("基于 Scikit-learn 的离线训练、评估与优化流程", self))
+
+        h_header.addWidget(icon)
+        h_header.addLayout(title_box)
+        h_header.addStretch(1)
+
+        self.v_layout.addWidget(self.header)
+
+        # ==========================================
+        # Section A: 数据配置 (Card)
+        # ==========================================
+        self.data_card = CardWidget()
+        l_data = QVBoxLayout(self.data_card)
+        l_data.setContentsMargins(20, 16, 20, 16)
+        l_data.setSpacing(12)
+
+        l_data.addWidget(StrongBodyLabel("📁 数据源配置", self))
+
+        # Row 1
+        row_d1 = QHBoxLayout()
+        self.ed_target = LineEdit()
+        self.ed_target.setPlaceholderText("目标列名 (例如 label)")
+        self.ed_target.setFixedWidth(120)
+
+        self.ed_features = LineEdit()
+        self.ed_features.setPlaceholderText("特征列 (留空自动识别)")
+
+        row_d1.addWidget(CaptionLabel("目标列:", self))
+        row_d1.addWidget(self.ed_target)
+        row_d1.addWidget(CaptionLabel("特征列:", self))
+        row_d1.addWidget(self.ed_features)
+        l_data.addLayout(row_d1)
+
+        # Row 2
+        row_d2 = QHBoxLayout()
+        self.split_spin = DoubleSpinBox()
+        self.split_spin.setRange(0.1, 0.9)
+        self.split_spin.setSingleStep(0.05)
+        self.split_spin.setFixedWidth(100)
+
+        self.btn_load_csv = PushButton(FIF.FOLDER, "导入 CSV", self)
+        self.btn_demo = PushButton(FIF.IOT, "生成演示数据", self)
+        self.btn_preview = PushButton(FIF.VIEW, "预览数据", self)
+
+        row_d2.addWidget(CaptionLabel("测试集比例:", self))
+        row_d2.addWidget(self.split_spin)
+        row_d2.addStretch(1)
+        row_d2.addWidget(self.btn_load_csv)
+        row_d2.addWidget(self.btn_demo)
+        row_d2.addWidget(self.btn_preview)
+        l_data.addLayout(row_d2)
+
+        self.v_layout.addWidget(self.data_card)
+
+        # ==========================================
+        # Section B: 算法与特征 (Split Layout)
+        # ==========================================
+        row_algo = QHBoxLayout()
+        row_algo.setSpacing(20)
+
+        # --- B1. 算法参数 ---
+        self.algo_card = CardWidget()
+        l_algo = QVBoxLayout(self.algo_card)
+        l_algo.setContentsMargins(20, 16, 20, 16)
+        l_algo.setSpacing(12)
+        l_algo.addWidget(StrongBodyLabel("⚙️ 算法配置", self))
+
+        self.cmb_algo = ComboBox()
+        self.cmb_algo.addItems(["SVM (RBF)", "SVM (Linear)", "KNN", "LogisticRegression", "RandomForest"])
         self.cmb_algo.currentIndexChanged.connect(self._on_algo_changed)
 
-        self.ed_grid = QLineEdit("C=0.1,1,10; gamma=scale,auto")  # 默认适配 SVM(RBF)
-        self.cv_spin = QSpinBox(); self.cv_spin.setRange(2, 20); self.cv_spin.setValue(5)
-        self.cmb_score = QComboBox(); self.cmb_score.addItems(["accuracy", "f1_macro", "roc_auc_ovr"])
-        self.chk_standardize = QCheckBox("标准化(Std)"); self.chk_standardize.setChecked(True)
+        self.ed_grid = LineEdit()
+        self.ed_grid.setPlaceholderText("参数网格 (Grid Search)")
 
-        r = 0
-        ag.addWidget(QLabel("算法"), r, 0); ag.addWidget(self.cmb_algo, r, 1, 1, 3); r += 1
-        ag.addWidget(QLabel("参数网格"), r, 0); ag.addWidget(self.ed_grid, r, 1, 1, 3); r += 1
-        ag.addWidget(QLabel("交叉验证折数"), r, 0); ag.addWidget(self.cv_spin, r, 1)
-        ag.addWidget(QLabel("评分指标"), r, 2); ag.addWidget(self.cmb_score, r, 3); r += 1
-        ag.addWidget(self.chk_standardize, r, 0, 1, 4); r += 1
-        box_algo.setLayout(ag)
+        row_cv = QHBoxLayout()
+        self.cv_spin = SpinBox()
+        self.cv_spin.setRange(2, 20)
+        self.cv_spin.setFixedWidth(100)
 
-        # —— 特征选择（可选） ——
-        box_feat = QGroupBox("特征选择（可选）")
-        fg = QGridLayout()
-        self.chk_kbest = QCheckBox("SelectKBest")
-        self.cmb_kbest_score = QComboBox(); self.cmb_kbest_score.addItems(["f_classif", "mutual_info"])
-        self.spin_k = QSpinBox(); self.spin_k.setRange(1, 4096); self.spin_k.setValue(20)
+        self.cmb_score = ComboBox()
+        self.cmb_score.addItems(["accuracy", "f1_macro", "roc_auc_ovr"])
 
-        self.chk_pca = QCheckBox("PCA")
-        self.spin_pca = QSpinBox(); self.spin_pca.setRange(1, 4096); self.spin_pca.setValue(10)
+        row_cv.addWidget(CaptionLabel("CV折数:", self))
+        row_cv.addWidget(self.cv_spin)
+        row_cv.addWidget(CaptionLabel("评分:", self))
+        row_cv.addWidget(self.cmb_score)
 
-        r = 0
-        fg.addWidget(self.chk_kbest, r, 0); fg.addWidget(QLabel("打分函数"), r, 1); fg.addWidget(self.cmb_kbest_score, r, 2); fg.addWidget(QLabel("k"), r, 3); fg.addWidget(self.spin_k, r, 4); r += 1
-        fg.addWidget(self.chk_pca, r, 0); fg.addWidget(QLabel("n_components"), r, 1); fg.addWidget(self.spin_pca, r, 2)
-        box_feat.setLayout(fg)
+        l_algo.addWidget(CaptionLabel("分类器模型:", self))
+        l_algo.addWidget(self.cmb_algo)
+        l_algo.addWidget(CaptionLabel("参数网格 (分号分隔):", self))
+        l_algo.addWidget(self.ed_grid)
+        l_algo.addLayout(row_cv)
+        l_algo.addStretch(1)
 
-        # —— 训练与评估 ——
-        box_train = QGroupBox("训练与评估")
-        tg = QGridLayout()
-        self.btn_train = QPushButton("开始训练")
-        self.btn_save = QPushButton("保存模型")
-        self.btn_load = QPushButton("加载模型并评估")
-        self.btn_lc = QPushButton("绘制学习曲线")          # 新增
-        self.txt_report = QTextEdit(); self.txt_report.setReadOnly(True)
-        self.canvas = MplCanvas()
-        tg.addWidget(self.btn_train, 0, 0)
-        tg.addWidget(self.btn_save, 0, 1)
-        tg.addWidget(self.btn_load, 0, 2)
-        tg.addWidget(self.btn_lc,   0, 3)
-        tg.addWidget(self.txt_report, 1, 0, 1, 4)
-        tg.addWidget(self.canvas, 2, 0, 1, 4)
-        box_train.setLayout(tg)
+        row_algo.addWidget(self.algo_card, 1)
 
-        # —— 批量对比实验（可选） ——
-        box_cmp = QGroupBox("批量对比实验（可选）")
-        cg = QGridLayout()
-        self.chk_cmp_svm_rbf = QCheckBox("SVM-RBF"); self.chk_cmp_svm_rbf.setChecked(True)
-        self.chk_cmp_svm_lin = QCheckBox("SVM-Linear")
-        self.chk_cmp_knn = QCheckBox("KNN")
-        self.chk_cmp_lr = QCheckBox("LogisticRegression")
-        self.chk_cmp_rf = QCheckBox("RandomForest")
-        self.cmb_cmp_metric = QComboBox(); self.cmb_cmp_metric.addItems(["accuracy", "f1_macro"])
-        self.btn_cmp = QPushButton("运行对比")
-        row = 0
-        cg.addWidget(QLabel("对比算法"), row, 0)
-        cg.addWidget(self.chk_cmp_svm_rbf, row, 1)
-        cg.addWidget(self.chk_cmp_svm_lin, row, 2)
-        cg.addWidget(self.chk_cmp_knn, row, 3)
-        cg.addWidget(self.chk_cmp_lr, row, 4)
-        cg.addWidget(self.chk_cmp_rf, row, 5)
-        row += 1
-        cg.addWidget(QLabel("评分指标"), row, 0); cg.addWidget(self.cmb_cmp_metric, row, 1)
-        cg.addWidget(self.btn_cmp, row, 5)
-        box_cmp.setLayout(cg)
+        # --- B2. 特征工程 ---
+        self.feat_card = CardWidget()
+        l_feat = QVBoxLayout(self.feat_card)
+        l_feat.setContentsMargins(20, 16, 20, 16)
+        l_feat.setSpacing(12)
+        l_feat.addWidget(StrongBodyLabel("🔧 特征工程", self))
 
-        # —— 总布局 ——
-        root = QVBoxLayout()
-        root.addWidget(box_data)
-        root.addWidget(box_algo)
-        root.addWidget(box_feat)
-        root.addWidget(box_train)
-        root.addWidget(box_cmp)
-        self.setLayout(root)
+        self.chk_standardize = CheckBox("标准化 (StandardScaler)")
 
-        # —— 事件 ——
+        # KBest
+        row_k = QHBoxLayout()
+        self.chk_kbest = CheckBox("SelectKBest")
+        self.cmb_kbest_score = ComboBox()
+        self.cmb_kbest_score.addItems(["f_classif", "mutual_info"])
+        self.spin_k = SpinBox()
+        self.spin_k.setRange(1, 9999)
+        row_k.addWidget(self.chk_kbest)
+        row_k.addWidget(self.cmb_kbest_score)
+        row_k.addWidget(CaptionLabel("k=", self))
+        row_k.addWidget(self.spin_k)
+
+        # PCA
+        row_pca = QHBoxLayout()
+        self.chk_pca = CheckBox("PCA 降维")
+        self.spin_pca = SpinBox()
+        self.spin_pca.setRange(1, 9999)
+        row_pca.addWidget(self.chk_pca)
+        row_pca.addWidget(CaptionLabel("n_comp=", self))
+        row_pca.addWidget(self.spin_pca)
+
+        l_feat.addWidget(self.chk_standardize)
+        l_feat.addLayout(row_k)
+        l_feat.addLayout(row_pca)
+        l_feat.addStretch(1)
+
+        row_algo.addWidget(self.feat_card, 1)
+
+        self.v_layout.addLayout(row_algo)
+
+        # ==========================================
+        # Section C: 训练控制 (Card)
+        # ==========================================
+        self.train_card = CardWidget()
+        l_train = QHBoxLayout(self.train_card)
+        l_train.setContentsMargins(24, 20, 24, 20)
+        l_train.setSpacing(16)
+
+        self.btn_train = PrimaryPushButton(FIF.PLAY, "开始训练", self)
+        self.btn_train.setFixedWidth(140)
+
+        # FIXED: Use valid icon FIF.MARKET for charts
+        self.btn_lc = PushButton(FIF.MARKET, "绘制学习曲线", self)
+
+        self.btn_save = PushButton(FIF.SAVE, "保存模型", self)
+        self.btn_load = PushButton(FIF.FOLDER, "加载模型", self)
+
+        l_train.addWidget(self.btn_train)
+        l_train.addWidget(self.btn_lc)
+        l_train.addStretch(1)
+        l_train.addWidget(self.btn_save)
+        l_train.addWidget(self.btn_load)
+
+        self.v_layout.addWidget(self.train_card)
+
+        # ==========================================
+        # Section D: 批量对比 (Card)
+        # ==========================================
+        self.cmp_card = CardWidget()
+        l_cmp = QVBoxLayout(self.cmp_card)
+        l_cmp.setContentsMargins(20, 16, 20, 16)
+
+        l_cmp.addWidget(StrongBodyLabel("⚖️ 批量算法对比 (可选)", self))
+
+        row_cmp = QHBoxLayout()
+        self.chk_cmp_svm_rbf = CheckBox("SVM-RBF")
+        self.chk_cmp_svm_lin = CheckBox("SVM-Lin")
+        self.chk_cmp_knn = CheckBox("KNN")
+        self.chk_cmp_lr = CheckBox("LogReg")
+        self.chk_cmp_rf = CheckBox("RF")
+
+        self.btn_cmp = PrimaryPushButton(FIF.SYNC, "运行对比", self)
+
+        row_cmp.addWidget(self.chk_cmp_svm_rbf)
+        row_cmp.addWidget(self.chk_cmp_svm_lin)
+        row_cmp.addWidget(self.chk_cmp_knn)
+        row_cmp.addWidget(self.chk_cmp_lr)
+        row_cmp.addWidget(self.chk_cmp_rf)
+        row_cmp.addStretch(1)
+        row_cmp.addWidget(self.btn_cmp)
+
+        l_cmp.addLayout(row_cmp)
+        self.v_layout.addWidget(self.cmp_card)
+
+        # ==========================================
+        # Section E: 结果展示 (Elevated Card)
+        # ==========================================
+        self.res_card = ElevatedCardWidget()
+        l_res = QVBoxLayout(self.res_card)
+        l_res.setContentsMargins(0, 0, 0, 0)
+        l_res.setSpacing(0)
+
+        self.txt_report = TextEdit()
+        self.txt_report.setReadOnly(True)
+        self.txt_report.setMaximumHeight(150)
+        self.txt_report.setPlaceholderText("训练日志与分类报告将显示在这里...")
+        self.txt_report.setStyleSheet(
+            "TextEdit { background: #FAFAFA; border: none; border-bottom: 1px solid #E5E5E5; }")
+
+        self.canvas = MplCanvas(width=10, height=8, dpi=100)
+
+        l_res.addWidget(self.txt_report)
+        l_res.addWidget(self.canvas)
+
+        self.v_layout.addWidget(self.res_card)
+
+        # 信号绑定
         self.btn_load_csv.clicked.connect(self._load_csv)
         self.btn_demo.clicked.connect(self._gen_demo)
         self.btn_preview.clicked.connect(self._preview)
@@ -242,455 +375,327 @@ class MLTrainerPanel(QWidget):
 
         os.makedirs("data/models", exist_ok=True)
 
-    def _apply_styles(self):
-        self.setStyleSheet(f"""
-            QWidget {{
-                background: #FFFFFF;
-                color: {DARK_TEXT};
-                font-family: "Microsoft YaHei","微软雅黑",Arial;
-                font-size: 14px;
-            }}
-            QGroupBox {{
-                border: 1px solid #E6E6E6;
-                border-radius: 12px;
-                padding: 10px;
-                margin-top: 8px;
-                background: #FAFAFA;
-                font-weight: bold;
-            }}
-            QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {{
-                border: 1px solid #D0D0D0;
-                border-radius: 8px;
-                padding: 6px 10px;
-                background: #F7F7F7;
-                min-width: 140px;
-            }}
-            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{
-                border: 1px solid {APPLE_BLUE};
-                background: #FFFFFF;
-            }}
-            QPushButton {{
-                background: {APPLE_BLUE};
-                color: #FFF;
-                padding: 8px 16px;
-                border-radius: 10px;
-                font-weight: bold;
-                border: none;
-                min-width: 120px;
-            }}
-            QPushButton:hover {{ background:#1A84FF; }}
-            QPushButton:pressed {{ background:#0062CC; }}
-            QTextEdit {{
-                border: 1px solid #E6E6E6;
-                border-radius: 8px;
-                padding: 8px;
-                background: #FFFFFF;
-            }}
-        """)
+    # ======================================================
+    # 配置持久化 (Phase 12)
+    # ======================================================
+    def _load_settings(self):
+        """启动时读取配置"""
+        self.ed_target.setText(cfg.get("ML", "target", "label", str))
+        self.ed_features.setText(cfg.get("ML", "features", "", str))
+        self.split_spin.setValue(cfg.get("ML", "split", 0.2, float))
 
-    # ---------------- 数据处理 ----------------
+        self.cmb_algo.setCurrentIndex(cfg.get("ML", "algo_idx", 0, int))
+        # 默认参数根据算法而定，但优先读取保存值
+        default_grid = "C=0.1,1,10; gamma=scale,auto"
+        self.ed_grid.setText(cfg.get("ML", "grid", default_grid, str))
+        self.cv_spin.setValue(cfg.get("ML", "cv", 5, int))
+
+        self.chk_standardize.setChecked(cfg.get("ML", "std", True, bool))
+        self.chk_kbest.setChecked(cfg.get("ML", "kbest", False, bool))
+        self.spin_k.setValue(cfg.get("ML", "k", 20, int))
+        self.chk_pca.setChecked(cfg.get("ML", "pca", False, bool))
+        self.spin_pca.setValue(cfg.get("ML", "n_pca", 10, int))
+
+    def closeEvent(self, e):
+        """关闭时保存配置"""
+        cfg.set("ML", "target", self.ed_target.text())
+        cfg.set("ML", "features", self.ed_features.text())
+        cfg.set("ML", "split", self.split_spin.value())
+
+        cfg.set("ML", "algo_idx", self.cmb_algo.currentIndex())
+        cfg.set("ML", "grid", self.ed_grid.text())
+        cfg.set("ML", "cv", self.cv_spin.value())
+
+        cfg.set("ML", "std", self.chk_standardize.isChecked())
+        cfg.set("ML", "kbest", self.chk_kbest.isChecked())
+        cfg.set("ML", "k", self.spin_k.value())
+        cfg.set("ML", "pca", self.chk_pca.isChecked())
+        cfg.set("ML", "n_pca", self.spin_pca.value())
+
+        super().closeEvent(e)
+
+    # ======================================================
+    # 辅助功能
+    # ======================================================
+
+    def _show_msg(self, title, content, success=True):
+        self.info.emit(f"{title}: {content}")
+        if success:
+            InfoBar.success(
+                title=title, content=content,
+                orient=Qt.Horizontal, isClosable=True, position=InfoBarPosition.TOP_RIGHT,
+                duration=3000, parent=self
+            )
+        else:
+            InfoBar.error(
+                title=title, content=content,
+                orient=Qt.Horizontal, isClosable=True, position=InfoBarPosition.TOP_RIGHT,
+                duration=3000, parent=self
+            )
+
+    def _style_axis(self, ax, title=""):
+        """统一图表风格：去边框、深灰字体、虚线网格"""
+        ax.set_title(title, fontsize=10, fontweight='bold', color='#333333', pad=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color('#E0E0E0')
+        ax.spines['bottom'].set_color('#E0E0E0')
+        ax.tick_params(axis='x', colors='#606060', labelsize=8)
+        ax.tick_params(axis='y', colors='#606060', labelsize=8)
+        ax.grid(True, linestyle='--', alpha=0.3, color='#C0C0C0')
+
+    def _clear_axes(self):
+        self.canvas.ax_cm.clear()
+        self.canvas.ax_roc.clear()
+        self.canvas.ax_lc.clear()
+        self.canvas.draw()
+
+    # ======================================================
+    # 业务逻辑
+    # ======================================================
+
+    def _on_algo_changed(self):
+        # 仅当输入框为空或为默认值时才自动填充，避免覆盖用户自定义值
+        # 这里简单起见，仅提供默认提示
+        pass
+
     def _load_csv(self):
         if pd is None:
-            QMessageBox.critical(self, "缺少依赖", "当前环境未安装 pandas，请先安装：pip install pandas")
+            self._show_msg("错误", "未安装 pandas", False)
             return
         path, _ = QFileDialog.getOpenFileName(self, "选择特征CSV", "data", "CSV Files (*.csv)")
-        if not path:
-            return
+        if not path: return
         try:
             self.df = pd.read_csv(path)
-            self.info.emit(f"CSV已载入：{os.path.basename(path)}，形状={self.df.shape}")
+            self._show_msg("成功", f"CSV已载入: {os.path.basename(path)} {self.df.shape}")
             self._extract_Xy()
         except Exception as e:
-            QMessageBox.critical(self, "载入失败", str(e))
-            self.info.emit(f"载入失败：{e}")
+            self._show_msg("失败", str(e), False)
 
     def _gen_demo(self):
-        """生成演示数据：两类可分样本，模拟CSP后特征空间"""
         n = 300
         rng = np.random.RandomState(0)
         mu0 = np.zeros(12)
-        mu1 = np.r_[np.ones(6)*0.8, np.ones(6)*-0.8]
-        cov = 0.3*np.eye(12)
-        X0 = rng.multivariate_normal(mu0, cov, size=n//2)
-        X1 = rng.multivariate_normal(mu1, cov, size=n//2)
+        mu1 = np.r_[np.ones(6) * 0.8, np.ones(6) * -0.8]
+        cov = 0.3 * np.eye(12)
+        X0 = rng.multivariate_normal(mu0, cov, size=n // 2)
+        X1 = rng.multivariate_normal(mu1, cov, size=n // 2)
         X = np.vstack([X0, X1]).astype(np.float32)
-        y = np.array([0]*(n//2) + [1]*(n//2))
+        y = np.array([0] * (n // 2) + [1] * (n // 2))
+
         if pd is None:
-            # 无 pandas：直接缓存为 X/y
             self.df = None
             self.X, self.y = X, y
             self.classes_ = np.array([0, 1])
-            self.info.emit("已生成演示数据（无pandas模式）：300×12 + label")
+            self._show_msg("成功", "已生成演示数据 (无Pandas模式)", True)
             return
-        cols = [f"f{i+1}" for i in range(X.shape[1])]
+
+        cols = [f"f{i + 1}" for i in range(X.shape[1])]
         self.df = pd.DataFrame(X, columns=cols)
         self.df["label"] = y
-        self.info.emit("已生成演示数据：300×12 + label")
+        self._show_msg("成功", "已生成演示数据", True)
         self._extract_Xy()
 
     def _preview(self):
         if self.df is None:
-            QMessageBox.information(self, "提示", "请先导入CSV或生成演示数据。")
+            self._show_msg("提示", "请先导入数据", False)
             return
         buf = io.StringIO()
         self.df.head(10).to_string(buf, index=False)
-        QMessageBox.information(self, "数据预览（前10行）", buf.getvalue())
+        self.txt_report.setPlainText(f"数据预览 (前10行):\n{buf.getvalue()}")
 
     def _extract_Xy(self):
-        if self.df is None:
-            return
+        if self.df is None: return
         target = self.ed_target.text().strip() or "label"
         if target not in self.df.columns:
-            raise ValueError(f"目标列 '{target}' 不存在。")
+            self._show_msg("错误", f"列名 {target} 不存在", False)
+            return
+
         feats_txt = self.ed_features.text().strip()
         if feats_txt:
             feats = [c.strip() for c in feats_txt.split(",") if c.strip()]
         else:
             feats = [c for c in self.df.columns if c != target]
-        if not feats:
-            raise ValueError("未找到任何特征列。")
+
         X = self.df[feats].values.astype(np.float32)
         y_raw = self.df[target].values
         classes, y_enc = np.unique(y_raw, return_inverse=True)
         self.X, self.y = X, y_enc
         self.classes_ = classes
-        self.info.emit(f"特征/标签已抽取：X={X.shape}, y={y_enc.shape}，类别={list(classes)}")
+        self.txt_report.setPlainText(f"特征提取完成: X={X.shape}, y={y_enc.shape}\n类别: {classes}")
 
-    # ---------------- Pipeline 构建 ----------------
-    def _build_feature_steps(self):
-        """根据UI构建特征选择/降维步骤"""
+    def _build_pipeline(self):
         steps = []
-        # SelectKBest
         if self.chk_kbest.isChecked():
-            k = int(self.spin_k.value())
-            score_name = self.cmb_kbest_score.currentText()
-            score_func = f_classif if score_name == "f_classif" else mutual_info_classif
-            steps.append(("select", SelectKBest(score_func=score_func, k=k)))
-        # 标准化
+            k = self.spin_k.value()
+            sc = f_classif if self.cmb_kbest_score.currentText() == "f_classif" else mutual_info_classif
+            steps.append(("select", SelectKBest(score_func=sc, k=k)))
         if self.chk_standardize.isChecked():
             steps.append(("scaler", StandardScaler()))
-        # PCA
         if self.chk_pca.isChecked():
-            n_comp = int(self.spin_pca.value())
-            steps.append(("pca", PCA(n_components=n_comp, random_state=0)))
-        return steps
+            steps.append(("pca", PCA(n_components=self.spin_pca.value(), random_state=0)))
 
-    def _on_algo_changed(self, idx: int):
-        name = self.cmb_algo.currentText()
-        if name == "SVM (RBF)":
-            self.ed_grid.setText("C=0.1,1,10; gamma=scale,auto")
-        elif name == "SVM (Linear)":
-            self.ed_grid.setText("C=0.1,1,10")
-        elif name == "KNN":
-            self.ed_grid.setText("n_neighbors=3,5,7,9; weights=uniform,distance")
-        elif name == "LogisticRegression":
-            self.ed_grid.setText("C=0.1,1,10; penalty=l2; solver=lbfgs")
-        elif name == "RandomForest":
-            self.ed_grid.setText("n_estimators=100,200; max_depth=3,5,7")
-        else:
-            self.ed_grid.setText("（深度学习占位，禁用）")
-
-    def _build_estimator_and_grid(self):
-        """根据算法选择，构造 Pipeline(est) 与 参数网格"""
         name = self.cmb_algo.currentText()
         grid_user = _parse_param_grid(self.ed_grid.text())
-        feat_steps = self._build_feature_steps()
 
         if name == "SVM (RBF)":
-            est = Pipeline(feat_steps + [("clf", SVC(kernel="rbf", probability=True, random_state=0))])
-            grid = {f"clf__{k}": v for k, v in grid_user.items()} if grid_user else {"clf__C":[1.0], "clf__gamma":["scale"]}
-
+            est = SVC(kernel="rbf", probability=True, random_state=0)
+            defs = {"clf__C": [1.0], "clf__gamma": ["scale"]}
         elif name == "SVM (Linear)":
-            est = Pipeline(feat_steps + [("clf", SVC(kernel="linear", probability=True, random_state=0))])
-            grid = {f"clf__{k}": v for k, v in grid_user.items()} if grid_user else {"clf__C":[1.0]}
-
+            est = SVC(kernel="linear", probability=True, random_state=0)
+            defs = {"clf__C": [1.0]}
         elif name == "KNN":
-            est = Pipeline(feat_steps + [("clf", KNeighborsClassifier())])
-            grid = {f"clf__{k}": v for k, v in grid_user.items()} if grid_user else {"clf__n_neighbors":[5]}
-
+            est = KNeighborsClassifier()
+            defs = {"clf__n_neighbors": [5]}
         elif name == "LogisticRegression":
-            est = Pipeline(feat_steps + [("clf", LogisticRegression(max_iter=300, random_state=0))])
-            grid = {f"clf__{k}": v for k, v in grid_user.items()} if grid_user else {"clf__C":[1.0], "clf__solver":["lbfgs"]}
-
+            est = LogisticRegression(max_iter=300, random_state=0)
+            defs = {"clf__C": [1.0]}
         elif name == "RandomForest":
-            est = Pipeline(feat_steps + [("clf", RandomForestClassifier(random_state=0))])
-            grid = {f"clf__{k}": v for k, v in grid_user.items()} if grid_user else {"clf__n_estimators":[200], "clf__max_depth":[5]}
-
+            est = RandomForestClassifier(random_state=0)
+            defs = {"clf__n_estimators": [100]}
         else:
-            raise RuntimeError("深度学习（占位）当前禁用。")
-        return est, grid
+            est = SVC(probability=True)
+            defs = {}
 
-    # ---------------- 训练/评估/可视化 ----------------
-    def _clear_axes(self):
-        self.canvas.ax_cm.clear()
-        self.canvas.ax_roc.clear()
-        self.canvas.ax_lc.clear()
-        # 对比图不在每次训练时清空，保留最近一次对比结果
-        self.canvas.draw()
-
-    def _plot_confusion_matrix(self, cm, labels):
-        ax = self.canvas.ax_cm
-        ax.clear()
-        im = ax.imshow(cm, interpolation="nearest")
-        ax.set_title("混淆矩阵")
-        ax.set_xlabel("预测标签"); ax.set_ylabel("真实标签")
-        ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels)
-        ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels)
-        # 标注格子数值
-        for i in range(cm.shape[0]):
-            for j in range(cm.shape[1]):
-                ax.text(j, i, str(cm[i, j]), ha="center", va="center")
-        self.canvas.draw()
-
-    def _plot_roc(self, Xte, yte, model=None):
-        ax = self.canvas.ax_roc
-        ax.clear()
-        mdl = model if model is not None else self.model
-        if mdl is None:
-            ax.text(0.5, 0.5, "无模型", ha="center", va="center")
-            self.canvas.draw(); return
-
-        if hasattr(mdl, "predict_proba"):
-            proba = mdl.predict_proba(Xte)
-            if proba.ndim == 2 and proba.shape[1] == 2:
-                fpr, tpr, _ = roc_curve(yte, proba[:, 1])
-                ax.plot(fpr, tpr, label=f"AUC={auc(fpr, tpr):.3f}")
-            else:
-                # 多分类：One-vs-rest
-                for k in range(proba.shape[1]):
-                    fpr, tpr, _ = roc_curve((yte == k).astype(int), proba[:, k])
-                    ax.plot(fpr, tpr, label=f"class {k} AUC={auc(fpr, tpr):.3f}")
-        else:
-            ax.text(0.5, 0.5, "当前算法不支持 ROC（缺少 predict_proba）", ha="center", va="center")
-
-        ax.plot([0, 1], [0, 1], "k--", lw=0.8)
-        ax.set_xlim([0, 1]); ax.set_ylim([0, 1])
-        ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
-        ax.set_title("ROC 曲线")
-        ax.legend(loc="lower right", fontsize=8)
-        self.canvas.draw()
+        steps.append(("clf", est))
+        pipe = Pipeline(steps)
+        grid = {f"clf__{k}": v for k, v in grid_user.items()} if grid_user else defs
+        return pipe, grid
 
     def _train(self):
-        try:
-            if self.X is None or self.y is None:
-                QMessageBox.information(self, "提示", "请先导入CSV或生成演示数据。")
-                return
+        if self.X is None or self.y is None:
+            self._show_msg("提示", "无数据", False)
+            return
 
-            test_size = float(self.split_spin.value())
+        try:
+            test_size = self.split_spin.value()
             Xtr, Xte, ytr, yte = train_test_split(self.X, self.y, test_size=test_size, stratify=self.y, random_state=0)
             self._last_split = (Xtr, Xte, ytr, yte)
 
-            est, grid = self._build_estimator_and_grid()
-            cv = int(self.cv_spin.value())
+            pipe, grid = self._build_pipeline()
+            cv = self.cv_spin.value()
             scoring = self.cmb_score.currentText()
 
-            self.info.emit(f"开始训练：算法={self.cmb_algo.currentText()}，CV={cv}，评分={scoring}")
-            self.txt_report.clear()
+            self._show_msg("开始训练", f"CV={cv}, Grid={grid}", True)
             self._clear_axes()
 
-            gs = GridSearchCV(estimator=est, param_grid=grid, scoring=scoring,
-                              cv=StratifiedKFold(n_splits=cv, shuffle=True, random_state=0),
+            gs = GridSearchCV(pipe, grid, scoring=scoring, cv=StratifiedKFold(cv, shuffle=True, random_state=0),
                               n_jobs=-1)
             gs.fit(Xtr, ytr)
 
             self.model = gs.best_estimator_
-            best_params = gs.best_params_
-            best_score = gs.best_score_
 
-            # 测试集评估
+            # Eval
             ypred = self.model.predict(Xte)
             report = classification_report(yte, ypred, target_names=[str(c) for c in self.classes_])
             cm = confusion_matrix(yte, ypred)
 
-            out = []
-            out.append(f"最优参数：{best_params}")
-            out.append(f"CV 最优分数（{scoring}）：{best_score:.4f}")
-            out.append("—— 测试集分类报告 ——")
-            out.append(report)
-            self.txt_report.setPlainText("\n".join(out))
+            self.txt_report.setPlainText(f"最优参数: {gs.best_params_}\n最佳CV分数: {gs.best_score_:.4f}\n\n{report}")
 
-            # 绘图：混淆矩阵 + ROC
-            self._plot_confusion_matrix(cm, [str(c) for c in self.classes_])
-            self._plot_roc(Xte, yte)
+            # Plot CM
+            self._style_axis(self.canvas.ax_cm, "Confusion Matrix")
+            self.canvas.ax_cm.imshow(cm, cmap="Blues")
+            for i in range(cm.shape[0]):
+                for j in range(cm.shape[1]):
+                    self.canvas.ax_cm.text(j, i, str(cm[i, j]), ha="center", va="center")
 
-            self.info.emit("训练完成。已在右侧展示混淆矩阵与ROC。")
+            # Plot ROC
+            self._style_axis(self.canvas.ax_roc, "ROC Curve")
+            if hasattr(self.model, "predict_proba"):
+                probs = self.model.predict_proba(Xte)
+                if probs.shape[1] == 2:
+                    fpr, tpr, _ = roc_curve(yte, probs[:, 1])
+                    self.canvas.ax_roc.plot(fpr, tpr, label=f"AUC={auc(fpr, tpr):.3f}", color="#FF6B6B")
+                else:
+                    for i in range(probs.shape[1]):
+                        fpr, tpr, _ = roc_curve((yte == i).astype(int), probs[:, i])
+                        self.canvas.ax_roc.plot(fpr, tpr, label=f"C{i} AUC={auc(fpr, tpr):.2f}")
+                self.canvas.ax_roc.plot([0, 1], [0, 1], 'k--', alpha=0.3)
+                self.canvas.ax_roc.legend(fontsize=8)
+
+            self.canvas.draw()
 
         except Exception as e:
-            QMessageBox.critical(self, "训练失败", str(e))
-            self.info.emit(f"训练失败：{e}")
+            self._show_msg("训练异常", str(e), False)
 
     def _draw_learning_curve(self):
-        """使用当前算法与特征步骤绘制学习曲线（可选功能按钮）"""
+        if self.X is None: return
         try:
-            if self.X is None or self.y is None:
-                QMessageBox.information(self, "提示", "请先导入CSV或生成演示数据。")
-                return
+            pipe, _ = self._build_pipeline()
+            cv = self.cv_spin.value()
+            self._style_axis(self.canvas.ax_lc, "Learning Curve")
 
-            est, _ = self._build_estimator_and_grid()
-            cv = int(self.cv_spin.value())
-            scoring = self.cmb_score.currentText()
-            # 训练样本比例 5 个点（10%->100%）
-            train_sizes = np.linspace(0.1, 1.0, 5)
+            ts, tr_sc, va_sc = learning_curve(pipe, self.X, self.y, cv=StratifiedKFold(cv), n_jobs=-1)
+            tr_mean = np.mean(tr_sc, axis=1)
+            va_mean = np.mean(va_sc, axis=1)
 
-            self.info.emit("开始绘制学习曲线...")
-            self.canvas.ax_lc.clear()
-            train_sizes_abs, train_scores, valid_scores = learning_curve(
-                est, self.X, self.y,
-                train_sizes=train_sizes,
-                cv=StratifiedKFold(n_splits=cv, shuffle=True, random_state=0),
-                scoring=scoring,
-                n_jobs=-1,
-                shuffle=True,
-                random_state=0 if "random_state" in est.get_params() else None
-            )
-            tr_mean, tr_std = train_scores.mean(axis=1), train_scores.std(axis=1)
-            va_mean, va_std = valid_scores.mean(axis=1), valid_scores.std(axis=1)
-
-            ax = self.canvas.ax_lc
-            ax.plot(train_sizes_abs, tr_mean, marker="o", label="训练分数")
-            ax.fill_between(train_sizes_abs, tr_mean - tr_std, tr_mean + tr_std, alpha=0.2)
-            ax.plot(train_sizes_abs, va_mean, marker="s", label="验证分数")
-            ax.fill_between(train_sizes_abs, va_mean - va_std, va_mean + va_std, alpha=0.2)
-            ax.set_xlabel("训练样本数")
-            ax.set_ylabel(scoring)
-            ax.set_title("学习曲线")
-            ax.legend()
+            self.canvas.ax_lc.plot(ts, tr_mean, 'o-', color="#4ECDC4", label="Train")
+            self.canvas.ax_lc.plot(ts, va_mean, 's-', color="#FF6B6B", label="Valid")
+            self.canvas.ax_lc.legend(fontsize=8)
             self.canvas.draw()
-            self.info.emit("学习曲线绘制完成。")
-
         except Exception as e:
-            QMessageBox.critical(self, "学习曲线失败", str(e))
-            self.info.emit(f"学习曲线失败：{e}")
+            self._show_msg("绘图失败", str(e), False)
 
-    # ---------------- 模型 I/O ----------------
     def _save_model(self):
-        if self.model is None:
-            QMessageBox.information(self, "提示", "请先训练模型。")
-            return
-        os.makedirs("data/models", exist_ok=True)
+        if not self.model: return
         path, _ = QFileDialog.getSaveFileName(self, "保存模型", "data/models/model.pkl", "Pickle (*.pkl)")
-        if not path:
-            return
-        try:
-            with open(path, "wb") as f:
-                pickle.dump({"model": self.model, "classes": self.classes_}, f)
-            self.info.emit(f"模型已保存：{path}")
-        except Exception as e:
-            QMessageBox.critical(self, "保存失败", str(e))
-            self.info.emit(f"保存失败：{e}")
+        if path:
+            try:
+                with open(path, "wb") as f:
+                    pickle.dump({"model": self.model, "classes": self.classes_}, f)
+                self._show_msg("成功", f"保存至 {path}", True)
+            except Exception as e:
+                self._show_msg("失败", str(e), False)
 
     def _load_model(self):
-        if self.X is None or self.y is None:
-            QMessageBox.information(self, "提示", "请先导入CSV或生成演示数据。")
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "选择模型", "data/models", "Pickle (*.pkl)")
-        if not path:
-            return
-        try:
-            with open(path, "rb") as f:
-                obj = pickle.load(f)
-            self.model = obj.get("model", None)
-            self.classes_ = obj.get("classes", self.classes_)
-            if self.model is None:
-                raise ValueError("模型文件无效。")
+        path, _ = QFileDialog.getOpenFileName(self, "加载模型", "data/models", "Pickle (*.pkl)")
+        if path:
+            try:
+                with open(path, "rb") as f:
+                    d = pickle.load(f)
+                self.model = d["model"]
+                self.classes_ = d["classes"]
+                self.txt_report.setPlainText(f"模型已加载: {os.path.basename(path)}")
+            except Exception as e:
+                self._show_msg("失败", str(e), False)
 
-            # 若已有最近一次划分，则沿用比例；否则重新划分
-            test_size = float(self.split_spin.value())
-            Xtr, Xte, ytr, yte = train_test_split(self.X, self.y, test_size=test_size, stratify=self.y, random_state=0)
-            self._last_split = (Xtr, Xte, ytr, yte)
-
-            ypred = self.model.predict(Xte)
-            report = classification_report(yte, ypred, target_names=[str(c) for c in self.classes_])
-            cm = confusion_matrix(yte, ypred)
-            self.txt_report.setPlainText("—— 加载模型评估 ——\n" + report)
-            self._plot_confusion_matrix(cm, [str(c) for c in self.classes_])
-            self._plot_roc(Xte, yte)
-            self.info.emit(f"已加载模型并完成评估：{os.path.basename(path)}")
-
-        except Exception as e:
-            QMessageBox.critical(self, "加载失败", str(e))
-            self.info.emit(f"加载失败：{e}")
-
-    # ---------------- 批量对比实验（可选） ----------------
     def _run_comparison(self):
+        if self.X is None: return
         try:
-            if self.X is None or self.y is None:
-                QMessageBox.information(self, "提示", "请先导入CSV或生成演示数据。")
-                return
+            Xtr, Xte, ytr, yte = train_test_split(self.X, self.y, test_size=0.2, stratify=self.y, random_state=0)
+            res = []
 
-            test_size = float(self.split_spin.value())
-            Xtr, Xte, ytr, yte = train_test_split(self.X, self.y, test_size=test_size, stratify=self.y, random_state=0)
-            cv = int(self.cv_spin.value())
-            metric = self.cmb_cmp_metric.currentText()
+            cands = []
+            if self.chk_cmp_svm_rbf.isChecked(): cands.append(("SVM-RBF", SVC(probability=True)))
+            if self.chk_cmp_svm_lin.isChecked(): cands.append(("SVM-Lin", SVC(kernel='linear', probability=True)))
+            if self.chk_cmp_knn.isChecked(): cands.append(("KNN", KNeighborsClassifier()))
+            if self.chk_cmp_lr.isChecked(): cands.append(("LR", LogisticRegression()))
+            if self.chk_cmp_rf.isChecked(): cands.append(("RF", RandomForestClassifier()))
 
-            # 按 UI 选择集成算法与其简易网格
-            todo = []
-            if self.chk_cmp_svm_rbf.isChecked():
-                todo.append(("SVM-RBF", SVC(kernel="rbf", probability=True, random_state=0),
-                             {"C": [0.1, 1, 10], "gamma": ["scale", "auto"]}))
-            if self.chk_cmp_svm_lin.isChecked():
-                todo.append(("SVM-Linear", SVC(kernel="linear", probability=True, random_state=0),
-                             {"C": [0.1, 1, 10]}))
-            if self.chk_cmp_knn.isChecked():
-                todo.append(("KNN", KNeighborsClassifier(), {"n_neighbors": [3, 5, 7, 9]}))
-            if self.chk_cmp_lr.isChecked():
-                todo.append(("LR", LogisticRegression(max_iter=300, random_state=0),
-                             {"C": [0.1, 1, 10], "solver": ["lbfgs"]}))
-            if self.chk_cmp_rf.isChecked():
-                todo.append(("RF", RandomForestClassifier(random_state=0),
-                             {"n_estimators": [100, 200], "max_depth": [3, 5, 7]}))
+            if not cands: return
 
-            if not todo:
-                QMessageBox.information(self, "提示", "请至少勾选一种算法进行对比。")
-                return
+            txt = "批量对比结果:\n"
+            base_steps = []
+            if self.chk_standardize.isChecked(): base_steps.append(("sc", StandardScaler()))
 
-            # 统一的特征步骤（按当前UI）
-            base_feat = self._build_feature_steps()
-            results = []
-            self.info.emit(f"开始批量对比：算法数={len(todo)}，评分={metric}")
+            scores = []
+            names = []
 
-            for name, clf, g in todo:
-                est = Pipeline(base_feat + [("clf", clf)])
-                grid = {f"clf__{k}": v for k, v in g.items()}
-                gs = GridSearchCV(estimator=est, param_grid=grid, scoring=metric,
-                                  cv=StratifiedKFold(n_splits=cv, shuffle=True, random_state=0),
-                                  n_jobs=-1)
-                gs.fit(Xtr, ytr)
-                best = gs.best_estimator_
-                scr_cv = gs.best_score_
-                ypred = best.predict(Xte)
-                if metric == "accuracy":
-                    scr_te = (ypred == yte).mean()
-                else:
-                    # 简易：macro f1
-                    from sklearn.metrics import f1_score
-                    scr_te = f1_score(yte, ypred, average="macro")
-                results.append((name, scr_cv, scr_te, best))
+            for name, clf in cands:
+                p = Pipeline(base_steps + [("clf", clf)])
+                p.fit(Xtr, ytr)
+                s = p.score(Xte, yte)
+                res.append((name, s))
+                txt += f"{name}: {s:.4f}\n"
+                scores.append(s)
+                names.append(name)
 
-            # 文本输出
-            lines = ["—— 批量对比结果 ——", f"评分指标（CV）：{metric}"]
-            for name, scv, ste, _best in results:
-                lines.append(f"{name:>12s} | CV={scv:.4f} | Test={ste:.4f}")
-            self.txt_report.append("\n" + "\n".join(lines))
+            self.txt_report.setPlainText(txt)
 
-            # 图：右下角条形图
-            ax = self.canvas.ax_cmp
-            ax.clear()
-            labels = [r[0] for r in results]
-            cv_scores = [r[1] for r in results]
-            te_scores = [r[2] for r in results]
-            x = np.arange(len(labels))
-            w = 0.35
-            ax.bar(x - w/2, cv_scores, width=w, label="CV")
-            ax.bar(x + w/2, te_scores, width=w, label="Test")
-            ax.set_xticks(x); ax.set_xticklabels(labels, rotation=10)
-            ax.set_ylim(0, 1.0)
-            ax.set_title("批量对比（更高更好）")
-            ax.legend()
+            self._style_axis(self.canvas.ax_cmp, "Batch Comparison")
+            self.canvas.ax_cmp.bar(names, scores, color=['#4ECDC4', '#FF6B6B', '#C7F464', '#556270', '#C44D58'])
+            self.canvas.ax_cmp.set_ylim(0, 1.05)
             self.canvas.draw()
 
-            self.info.emit("批量对比完成。图表与结果已更新。")
-
         except Exception as e:
-            QMessageBox.critical(self, "对比失败", str(e))
-            self.info.emit(f"对比失败：{e}")
+            self._show_msg("对比失败", str(e), False)

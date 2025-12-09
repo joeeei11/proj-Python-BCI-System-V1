@@ -1,140 +1,190 @@
 # -*- coding: utf-8 -*-
 # login_dialog.py
-#
-# 说明：
-# - 固定账号/密码： admin / 123456
-# - 不依赖 bcrypt 或数据库，零外部依赖
-# - 保持与主程序接口一致（MainWindow 从 dlg.username_edit 读取用户名）
-# - 集成系统日志（log_module），记录登录成功/失败
+# 登录界面 (Fluent Design 重构版)
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+import sys
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout, QLineEdit, QPushButton, QLabel, QHBoxLayout, QCheckBox
+    QDialog, QVBoxLayout, QWidget, QGraphicsDropShadowEffect
 )
 
-# 日志模块（确保项目根目录有 log_module.py）
-try:
-    from log_module import log_module
-except Exception:
-    class _DummyLogger:
-        def log_info(self, m): pass
-        def log_warning(self, m): pass
-        def log_error(self, m): pass
-        def log_debug(self, m): pass
-    log_module = _DummyLogger()
+# 引入 Fluent Widgets
+from qfluentwidgets import (
+    LineEdit, PasswordLineEdit, CheckBox,
+    PrimaryPushButton, PushButton,
+    TitleLabel, BodyLabel,
+    InfoBar, InfoBarPosition,
+    IconWidget, FluentIcon as FIF,
+    setTheme, Theme
+)
 
-# 固定用户表（如需扩展，可在此新增用户）
-VALID_USERS = {
-    "admin": "123456"
-}
 
 class LoginDialog(QDialog):
-    def __init__(self, parent=None):
+    """
+    Fluent 风格登录对话框
+    无边框、阴影卡片、现代控件
+    """
+    info = pyqtSignal(str)
+
+    def __init__(self, parent=None, fixed_user: str = "admin", fixed_pass: str = "123456"):
         super().__init__(parent)
-        self.setWindowTitle("用户登录")
-        self.setMinimumWidth(380)
-        self.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.fixed_user = fixed_user
+        self.fixed_pass = fixed_pass
 
-        # —— 表单控件 ——
-        self.username_edit = QLineEdit()
-        self.username_edit.setPlaceholderText("请输入用户名（admin）")
-        self.password_edit = QLineEdit()
-        self.password_edit.setPlaceholderText("请输入密码（123456）")
-        self.password_edit.setEchoMode(QLineEdit.Password)
+        # 1. 窗口属性设置
+        # 无边框 + 对话框模式
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        # 背景透明 (为了显示圆角和阴影)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(420, 560)
 
-        # 显示/隐藏密码
-        self.show_pwd = QCheckBox("显示密码")
-        self.show_pwd.toggled.connect(
-            lambda on: self.password_edit.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password)
-        )
+        # 拖拽移动支持
+        self._is_dragging = False
+        self._drag_pos = QPoint()
 
-        self.msg_label = QLabel("")   # 提示信息
-        self.msg_label.setAlignment(Qt.AlignCenter)
+        self._init_ui()
 
-        self.btn_login = QPushButton("登录")
-        self.btn_cancel = QPushButton("取消")
+    def _init_ui(self):
+        """初始化 UI"""
 
-        # —— 布局 ——
-        form = QFormLayout()
-        form.addRow("用户名：", self.username_edit)
-        form.addRow("密码：", self.password_edit)
-
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        btns.addWidget(self.btn_login)
-        btns.addWidget(self.btn_cancel)
-
-        root = QVBoxLayout()
-        root.addLayout(form)
-        root.addWidget(self.show_pwd, 0, Qt.AlignLeft)
-        root.addSpacing(6)
-        root.addWidget(self.msg_label)
-        root.addSpacing(8)
-        root.addLayout(btns)
-        self.setLayout(root)
-
-        # —— 样式（苹果风格，圆角+黑白灰+蓝强调） ——
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; }
-            QLabel { color:#323232; }
-            QLineEdit {
-                border:1px solid #D0D0D0; border-radius:10px; padding:8px 10px;
-                background:#F7F7F7; color:#000;
+        # 2. 主容器 (卡片)
+        self.card = QWidget(self)
+        self.card.setGeometry(10, 10, 400, 540)  # 留出边距给阴影
+        self.card.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #E5E5E5;
+                border-radius: 12px;
             }
-            QLineEdit:focus { border:1px solid #007AFF; background:#FFFFFF; }
-            QPushButton {
-                background:#007AFF; color:#FFF; border:none; border-radius:10px;
-                padding:10px 18px; min-width:100px; font-weight:bold;
-            }
-            QPushButton:hover { background:#1A84FF; }
-            QPushButton:pressed { background:#0062CC; }
-            QCheckBox { color:#323232; }
         """)
 
-        # —— 信号 ——
-        self.btn_login.clicked.connect(self._on_login)
+        # 3. 阴影效果
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        self.card.setGraphicsEffect(shadow)
+
+        # 4. 垂直布局
+        layout = QVBoxLayout(self.card)
+        layout.setContentsMargins(40, 50, 40, 40)
+        layout.setSpacing(16)
+
+        # --- 图标区 ---
+        self.icon_widget = IconWidget(FIF.EDUCATION)
+        self.icon_widget.setFixedSize(64, 64)
+        layout.addWidget(self.icon_widget, 0, Qt.AlignHCenter)
+
+        layout.addSpacing(8)
+
+        # --- 标题区 ---
+        title = TitleLabel("NeuroPilot", self)
+        subtitle = BodyLabel("运动想象上肢康复系统", self)
+        subtitle.setTextColor(QColor(96, 96, 96), QColor(96, 96, 96))  # 灰色
+
+        layout.addWidget(title, 0, Qt.AlignHCenter)
+        layout.addWidget(subtitle, 0, Qt.AlignHCenter)
+
+        layout.addSpacing(24)
+
+        # --- 输入区 ---
+        self.user_edit = LineEdit(self)
+        self.user_edit.setPlaceholderText("请输入账号")
+        self.user_edit.setClearButtonEnabled(True)
+        # 支持回车跳转
+        self.user_edit.returnPressed.connect(lambda: self.pass_edit.setFocus())
+
+        self.pass_edit = PasswordLineEdit(self)
+        self.pass_edit.setPlaceholderText("请输入密码")
+        self.pass_edit.returnPressed.connect(self._try_login)
+
+        layout.addWidget(self.user_edit)
+        layout.addWidget(self.pass_edit)
+
+        # --- 选项区 ---
+        self.remember_chk = CheckBox("记住密码", self)
+        layout.addWidget(self.remember_chk)
+
+        layout.addSpacing(24)
+
+        # --- 按钮区 ---
+        self.btn_login = PrimaryPushButton("登录", self)
+        self.btn_login.clicked.connect(self._try_login)
+        self.btn_login.setFixedHeight(36)
+
+        self.btn_cancel = PushButton("取消", self)
         self.btn_cancel.clicked.connect(self.reject)
-        # 回车键直接登录
-        self.username_edit.returnPressed.connect(self._on_login)
-        self.password_edit.returnPressed.connect(self._on_login)
+        self.btn_cancel.setFixedHeight(36)
 
-        log_module.log_info("登录界面已打开")
+        layout.addWidget(self.btn_login)
+        layout.addWidget(self.btn_cancel)
+        layout.addStretch(1)
 
-    def _on_login(self):
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text()
+        # --- 底部提示 ---
+        hint = BodyLabel(f"默认账号: {self.fixed_user} / {self.fixed_pass}", self)
+        hint.setTextColor(QColor(150, 150, 150), QColor(150, 150, 150))
+        hint.setFont(QFont("Microsoft YaHei", 9))
+        layout.addWidget(hint, 0, Qt.AlignHCenter)
 
-        # 空检查
-        if not username:
-            self._set_error("用户名不能为空")
-            log_module.log_warning("登录失败：用户名为空")
-            return
-        if not password:
-            self._set_error("密码不能为空")
-            log_module.log_warning("登录失败：密码为空")
-            return
+        # 默认焦点
+        self.user_edit.setFocus()
 
-        # 校验
-        if username not in VALID_USERS:
-            self._set_error("用户名不存在")
-            log_module.log_error(f"登录失败：用户名不存在 - {username}")
-            return
+    def _try_login(self):
+        """验证逻辑"""
+        u = self.user_edit.text().strip()
+        p = self.pass_edit.text().strip()
 
-        if VALID_USERS[username] != password:
-            self._set_error("密码错误")
-            log_module.log_error(f"登录失败：密码错误 - {username}")
-            return
+        if u == self.fixed_user and p == self.fixed_pass:
+            self.info.emit(f"登录成功: {u}")
+            self.accept()
+        else:
+            # 使用 InfoBar 显示错误，而不是 Label
+            InfoBar.error(
+                title='登录失败',
+                content="账号或密码错误，请重试。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self.card
+            )
+            self.pass_edit.clear()
+            self.pass_edit.setFocus()
+            self.info.emit("登录失败: 密码错误")
 
-        # 成功
-        self._set_ok("登录成功")
-        log_module.log_info(f"用户登录成功 - {username}")
-        self.accept()
+    # --- 窗口拖拽逻辑 ---
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._is_dragging = True
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
 
-    def _set_error(self, text: str):
-        self.msg_label.setText(text)
-        self.msg_label.setStyleSheet("color:#FF3B30; font-weight:bold;")
+    def mouseMoveEvent(self, event):
+        if self._is_dragging:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
 
-    def _set_ok(self, text: str):
-        self.msg_label.setText(text)
-        self.msg_label.setStyleSheet("color:#4CD964; font-weight:bold;")
+    def mouseReleaseEvent(self, event):
+        self._is_dragging = False
+
+
+# 独立测试
+if __name__ == "__main__":
+    from PyQt5.QtWidgets import QApplication
+
+    # 启用高 DPI
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
+    app = QApplication(sys.argv)
+    setTheme(Theme.LIGHT)
+
+    w = LoginDialog()
+    if w.exec_():
+        print("Login Success")
+    else:
+        print("Login Cancelled")
+    sys.exit()
