@@ -1,7 +1,8 @@
+### eeg_module.py
 # -*- coding: utf-8 -*-
 # eeg_module.py
-# 脑电控制模块 (Phase 12: Config Persistence)
-# 变更：接入 ConfigManager 实现参数自动保存与恢复
+# 脑电控制模块 (Phase 20: Config Persistence & Multi-modal)
+# 变更：支持 UDP 直连和 LSL 流式输入
 
 import numpy as np
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
@@ -101,7 +102,14 @@ class EEGModule(QWidget):
 
         # 模式选择
         self.mode_combo = ComboBox()
-        self.mode_combo.addItems(["演示模式", "串口 (Serial)", "蓝牙 (Bluetooth)", "NeuSenW TCP"])
+        self.mode_combo.addItems([
+            "演示模式",
+            "串口 (Serial)",
+            "蓝牙 (Bluetooth)",
+            "NeuSenW TCP",
+            "UDP 直连",
+            "LSL (Lab Streaming Layer)"
+        ])
         self.mode_combo.currentTextChanged.connect(self._update_input_fields)
 
         conn_l.addWidget(CaptionLabel("采集模式"), 1, 0)
@@ -126,7 +134,7 @@ class EEGModule(QWidget):
         conn_l.addWidget(CaptionLabel("蓝牙地址"), 3, 0)
         conn_l.addWidget(self.bt_edit, 3, 1, 1, 3)
 
-        conn_l.addWidget(CaptionLabel("TCP IP/端口"), 4, 0)
+        conn_l.addWidget(CaptionLabel("网络参数 (IP/Port)"), 4, 0)
         conn_l.addWidget(self.tcp_host, 4, 1)
         conn_l.addWidget(self.tcp_port, 4, 2, 1, 2)
 
@@ -249,13 +257,24 @@ class EEGModule(QWidget):
         m = self.mode_combo.currentText()
         is_serial = "串口" in m
         is_bt = "蓝牙" in m
-        is_tcp = "TCP" in m
+        # TCP 和 UDP 共用网络输入框
+        is_net = "TCP" in m or "UDP" in m
+        # LSL 不需要任何参数（自动发现）
+        is_lsl = "LSL" in m
 
         self.port_edit.setEnabled(is_serial)
         self.baud_edit.setEnabled(is_serial)
         self.bt_edit.setEnabled(is_bt)
-        self.tcp_host.setEnabled(is_tcp)
-        self.tcp_port.setEnabled(is_tcp)
+        self.tcp_host.setEnabled(is_net)
+        self.tcp_port.setEnabled(is_net)
+
+        # 调整提示词
+        if "UDP" in m:
+            self.tcp_host.setPlaceholderText("监听 IP (0.0.0.0)")
+            self.tcp_port.setPlaceholderText("监听端口")
+        elif "TCP" in m:
+            self.tcp_host.setPlaceholderText("服务器 IP")
+            self.tcp_port.setPlaceholderText("端口")
 
     def _update_ui_state(self, connected: bool):
         """连接状态改变时更新UI"""
@@ -279,34 +298,44 @@ class EEGModule(QWidget):
         self._save_settings()  # 保存参数
 
         mode_text = self.mode_combo.currentText()
-        cfg = {'srate': 250, 'n_channels': 8}
+        cfg_params = {'srate': 250, 'n_channels': 8}
 
         if "串口" in mode_text:
-            cfg['mode'] = 'serial'
-            cfg['port'] = self.port_edit.text().strip()
+            cfg_params['mode'] = 'serial'
+            cfg_params['port'] = self.port_edit.text().strip()
             try:
-                cfg['baud'] = int(self.baud_edit.text().strip())
+                cfg_params['baud'] = int(self.baud_edit.text().strip())
             except:
-                cfg['baud'] = 115200
+                cfg_params['baud'] = 115200
         elif "蓝牙" in mode_text:
-            cfg['mode'] = 'bluetooth'
-            cfg['bt_addr'] = self.bt_edit.text().strip()
+            cfg_params['mode'] = 'bluetooth'
+            cfg_params['bt_addr'] = self.bt_edit.text().strip()
         elif "TCP" in mode_text:
-            cfg['mode'] = 'tcp'
-            cfg['ip'] = self.tcp_host.text().strip()
+            cfg_params['mode'] = 'tcp'
+            cfg_params['ip'] = self.tcp_host.text().strip()
             try:
-                cfg['port'] = int(self.tcp_port.text().strip())
+                cfg_params['port'] = int(self.tcp_port.text().strip())
             except:
-                cfg['port'] = 8712
-            cfg['srate'] = 1000
-            cfg['n_channels'] = 9
+                cfg_params['port'] = 8712
+            cfg_params['srate'] = 1000
+            cfg_params['n_channels'] = 9
+        elif "UDP" in mode_text:
+            cfg_params['mode'] = 'udp'
+            cfg_params['ip'] = self.tcp_host.text().strip() or "0.0.0.0"
+            try:
+                cfg_params['port'] = int(self.tcp_port.text().strip())
+            except:
+                cfg_params['port'] = 8888
+        elif "LSL" in mode_text:
+            cfg_params['mode'] = 'lsl'
+            # LSL 自动发现，不需要额外参数
         else:
-            cfg['mode'] = 'demo'
+            cfg_params['mode'] = 'demo'
 
         # 禁用按钮，显示状态
         self.btn_connect.setEnabled(False)
         self.btn_connect.setText("握手中...")
-        self.worker.start_acquisition(cfg)
+        self.worker.start_acquisition(cfg_params)
 
     def _on_btn_disconnect(self):
         self.worker.stop_acquisition()

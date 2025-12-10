@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 # dashboard_module.py
-# 仪表盘模块 (Phase 13: Real-time Plotting Optimization)
-# 职责：实时波形显示、系统状态概览、快捷控制
-# 优化：Numpy 批量写入、实时去直流、自动演示切换
-# 状态：Production Ready
+# 仪表盘模块 (Phase 20 Step 2: Visual Config & Channel Filtering)
+# 职责：实时波形显示、系统状态概览、快捷控制、通道可视化配置
+# 优化：支持通道重命名、动态筛选、自动堆叠显示
 
 import numpy as np
 from collections import deque
@@ -11,13 +10,13 @@ from collections import deque
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFrame
+    QWidget, QVBoxLayout, QHBoxLayout, QFrame, QGridLayout, QCheckBox
 )
 
 # --- Fluent Widgets ---
 from qfluentwidgets import (
     CardWidget, SimpleCardWidget, ElevatedCardWidget,
-    PrimaryPushButton, PushButton, ComboBox, ProgressBar, ToggleButton,
+    PrimaryPushButton, PushButton, ComboBox, ProgressBar, ToggleButton, LineEdit,
     TitleLabel, SubtitleLabel, CaptionLabel, StrongBodyLabel, BodyLabel,
     InfoBadge, InfoLevel, IconWidget, FluentIcon as FIF,
     setTheme, Theme
@@ -52,12 +51,23 @@ class DashboardPage(QWidget):
         super().__init__()
         self.username = username
 
-        # --- 信号配置 ---
+        # --- 基础配置 ---
         self.fs = 250  # 默认采样率 (会被 Worker 覆盖)
         self.win_sec = 5  # 显示窗口长度 (秒)
-        self.n_channels = 8  # 默认通道数
+        self.n_channels = 8  # 默认支持的最大通道数
         self.buf_len = self.fs * self.win_sec
         self.scale_factor = 50.0  # 默认通道间距 uV
+
+        # --- 通道可视化配置 (Phase 20) ---
+        # 默认名称映射 (Standard MI Montage)
+        self.default_map = "Fz, C3, Cz, C4, Pz, O1, O2, P3"
+        self.ch_names = [x.strip() for x in self.default_map.split(',')]
+        # 补齐名称
+        while len(self.ch_names) < self.n_channels:
+            self.ch_names.append(f"Ch{len(self.ch_names) + 1}")
+
+        # 可见性状态
+        self.ch_vis = [True] * self.n_channels
 
         # 初始化缓冲区 (预填充 0)
         self.buffers = [deque([0.0] * self.buf_len, maxlen=self.buf_len) for _ in range(self.n_channels)]
@@ -144,7 +154,49 @@ class DashboardPage(QWidget):
         chart_l.addWidget(self.plot_container, 1)
 
         # =================================================
-        # 3. Control Card
+        # 3. Visual Config Card (New in Phase 20)
+        # =================================================
+        self.vis_card = SimpleCardWidget(self)
+        vis_l = QVBoxLayout(self.vis_card)
+        vis_l.setContentsMargins(24, 16, 24, 16)
+        vis_l.setSpacing(12)
+
+        vis_l.addWidget(StrongBodyLabel("通道可视化配置", self))
+
+        # Row 1: Name Mapping
+        row_map = QHBoxLayout()
+        row_map.addWidget(CaptionLabel("通道名称映射 (逗号分隔):", self))
+        self.ed_ch_map = LineEdit(self)
+        self.ed_ch_map.setText(self.default_map)
+        self.ed_ch_map.setPlaceholderText("例如: Fp1, Fp2, C3, C4...")
+        self.ed_ch_map.textChanged.connect(self._update_ch_config)
+        row_map.addWidget(self.ed_ch_map, 1)
+        vis_l.addLayout(row_map)
+
+        # Row 2: Visibility Toggles
+        row_chk = QHBoxLayout()
+        row_chk.addWidget(CaptionLabel("显示通道:", self))
+
+        self.chk_list = []
+        chk_grid = QGridLayout()
+        chk_grid.setContentsMargins(0, 0, 0, 0)
+        chk_grid.setHorizontalSpacing(16)
+
+        for i in range(self.n_channels):
+            # 使用原生 QCheckBox 因为更紧凑，或者 Fluent CheckBox
+            chk = QCheckBox(f"Ch{i + 1}")
+            chk.setChecked(True)
+            chk.stateChanged.connect(self._update_ch_config)
+            # 简单的 2行布局
+            chk_grid.addWidget(chk, 0 if i < 4 else 1, i % 4)
+            self.chk_list.append(chk)
+
+        row_chk.addLayout(chk_grid)
+        row_chk.addStretch(1)
+        vis_l.addLayout(row_chk)
+
+        # =================================================
+        # 4. Control Card
         # =================================================
         self.control_card = CardWidget(self)
         self.control_card.setFixedHeight(120)
@@ -230,9 +282,14 @@ class DashboardPage(QWidget):
         ctrl_l.addLayout(dev_l)
         ctrl_l.addStretch(1)
 
+        # Final Vertical Stack
         self.v_layout.addWidget(self.header_card)
         self.v_layout.addWidget(self.chart_card, 1)
+        self.v_layout.addWidget(self.vis_card)  # Inserted
         self.v_layout.addWidget(self.control_card)
+
+        # Trigger initial update
+        self._update_ch_config()
 
     def _init_chart(self):
         layout = QVBoxLayout(self.plot_container)
@@ -250,7 +307,7 @@ class DashboardPage(QWidget):
             self.pg_plot.enableAutoRange()
 
             self.pg_plot.setLabel('bottom', 'Time (s)', color='#666666')
-            self.pg_plot.setLabel('left', 'Amplitude (uV)', color='#666666')
+            # Y Label 留空，通过 Axis Ticks 显示通道名
 
             layout.addWidget(self.pg_plot)
 
@@ -283,6 +340,24 @@ class DashboardPage(QWidget):
     # ======================================================
     # Logic & Signals
     # ======================================================
+
+    def _update_ch_config(self):
+        """解析用户配置的通道名称与可见性"""
+        # 1. 解析名称
+        text = self.ed_ch_map.text()
+        names = [x.strip() for x in text.split(',') if x.strip()]
+        # 补齐
+        while len(names) < self.n_channels:
+            names.append(f"Ch{len(names) + 1}")
+        self.ch_names = names[:self.n_channels]
+
+        # 2. 更新 Checkbox 文本与状态
+        for i, chk in enumerate(self.chk_list):
+            if i < len(self.ch_names):
+                chk.setText(self.ch_names[i])
+                self.ch_vis[i] = chk.isChecked()
+            else:
+                self.ch_vis[i] = False
 
     def bind_task_module(self, task_page):
         self._task_module = task_page
@@ -378,69 +453,90 @@ class DashboardPage(QWidget):
         Args:
             values: np.ndarray shape (n_samples, n_channels)
         """
-        # 1. 自动关闭演示模式，避免混淆
         if self.demo_eeg:
             self.btn_demo.setChecked(False)  # 触发 _toggle_demo(False)
 
-        # 2. 格式校验与转换
         if not isinstance(values, np.ndarray):
             values = np.array(values)
-
-        # 确保是 2D 数组 (n_samples, n_channels)
         if values.ndim == 1:
             values = values.reshape(1, -1)
 
         n_samples, n_ch_in = values.shape
 
-        # 3. 批量写入 RingBuffer (高性能)
-        # 仅处理 UI 支持的通道数 (比如前8个)
         limit = min(self.n_channels, n_ch_in)
         for i in range(limit):
-            # extend 接受 iterable，这里切片 values[:, i] 是最高效的
             self.buffers[i].extend(values[:, i])
 
     def _tick(self):
-        """定时刷新绘图"""
+        """定时刷新绘图 (支持通道动态筛选与堆叠)"""
         if not self.isVisible(): return
 
+        # 1. 获取当前需要显示的通道索引
+        visible_indices = [i for i, vis in enumerate(self.ch_vis) if vis]
+
+        # 2. 绘图
         if pg:
-            # 时间轴 (假定最新点是 0s)
             t = np.linspace(-self.win_sec, 0, self.buf_len)
+            ticks = []  # 用于 Y 轴标签 [(value, label), ...]
 
-            # 通道堆叠间距
-            offset_step = self.scale_factor
-
+            # 遍历所有曲线，分别处理可见与不可见
             for i, curve in enumerate(self.pg_curves):
-                # 转换 deque -> numpy (Copy)
-                data = np.array(self.buffers[i])
+                if i in visible_indices:
+                    # 计算堆叠偏移量：根据它在 visible_indices 中的顺序 (stack_idx)
+                    stack_idx = visible_indices.index(i)
+                    offset = stack_idx * self.scale_factor
 
-                # 4. 实时去直流 (Baseline Correction)
-                # 关键：减去均值，防止波形因 DC 偏移跑出屏幕
-                if len(data) > 0:
-                    data = data - np.mean(data)
+                    data = np.array(self.buffers[i])
+                    # 去直流
+                    if len(data) > 0:
+                        data = data - np.mean(data)
+                    # 补齐
+                    if len(data) < self.buf_len:
+                        pad = np.zeros(self.buf_len - len(data))
+                        data = np.concatenate([pad, data])
 
-                # 填充不足长度 (启动初期)
-                if len(data) < self.buf_len:
-                    pad = np.zeros(self.buf_len - len(data))
-                    data = np.concatenate([pad, data])
+                    # 绘制
+                    curve.setData(t, data + offset)
+                    curve.setVisible(True)
 
-                # 5. 堆叠显示
-                # 第 0 通道在最下方，第 N 通道在上方
-                shifted_data = data + (i * offset_step)
+                    # 记录 Y 轴标签位置
+                    ticks.append((offset, self.ch_names[i]))
+                else:
+                    # 隐藏不可见通道
+                    curve.setData([], [])
+                    curve.setVisible(False)
 
-                curve.setData(t, shifted_data)
+            # 更新 Y 轴标签 (只显示可见通道的名称)
+            # setTicks 需要传入 list of list: [ [(val, text), ...], [] ]
+            self.pg_plot.getPlotItem().getAxis('left').setTicks([ticks])
+
         else:
             # Matplotlib Fallback
             t = np.linspace(-self.win_sec, 0, self.buf_len)
+            yticks = []
+            yticklabels = []
+
             for i, line in enumerate(self.lines):
-                data = np.array(self.buffers[i])
-                if len(data) > 0:
-                    data = data - np.mean(data)  # DC Removal
+                if i in visible_indices:
+                    stack_idx = visible_indices.index(i)
+                    offset = stack_idx * self.scale_factor
 
-                if len(data) < self.buf_len:
-                    data = np.pad(data, (self.buf_len - len(data), 0), mode='edge')
+                    data = np.array(self.buffers[i])
+                    if len(data) > 0: data = data - np.mean(data)
+                    if len(data) < self.buf_len:
+                        data = np.pad(data, (self.buf_len - len(data), 0), mode='edge')
 
-                line.set_data(t, data + i * 50)
+                    line.set_data(t, data + offset)
+                    line.set_visible(True)
+
+                    yticks.append(offset)
+                    yticklabels.append(self.ch_names[i])
+                else:
+                    line.set_visible(False)
+
+            # 更新坐标轴
+            self.ax.set_yticks(yticks)
+            self.ax.set_yticklabels(yticklabels)
 
             self.ax.relim()
             self.ax.autoscale_view()
@@ -458,16 +554,12 @@ class DashboardPage(QWidget):
 
     def _demo_step(self):
         t = self.demo_phase
-        # 简单的合成波
         vals = []
         for i in range(self.n_channels):
             base = np.sin(2 * np.pi * 10 * t) * 10.0
             noise = np.random.randn() * 2.0
-            vals.append(base + noise + i * 10)  # 加偏置
+            vals.append(base + noise + i * 10)
 
-        # 喂入数据 (复用优化后的 feed 接口)
-        # 注意：这里不能调用 feed_eeg_samples，因为它会检测 demo_eeg 并自动关闭
-        # 所以我们需要手动 extend
         for i in range(self.n_channels):
             self.buffers[i].extend([vals[i]])
 

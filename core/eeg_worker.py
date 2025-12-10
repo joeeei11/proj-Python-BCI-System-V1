@@ -1,7 +1,8 @@
+### core/eeg_worker.py
 # -*- coding: utf-8 -*-
 # core/eeg_worker.py
 # 核心业务工作类：EEG采集、处理、存储、预测
-# Phase 14 Step 1: 流量埋点 (Traffic Instrumentation)
+# Phase 20 Step 1: 多模态采集升级 (UDP & LSL Support)
 
 import time
 import csv
@@ -24,7 +25,7 @@ from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 
-# 可选硬件依赖
+# --- 可选硬件依赖 ---
 try:
     import serial
 except ImportError:
@@ -34,6 +35,11 @@ try:
     from bluetooth import BluetoothSocket, RFCOMM
 except ImportError:
     BluetoothSocket, RFCOMM = None, None
+
+try:
+    import pylsl
+except ImportError:
+    pylsl = None
 
 
 class RingBuffer:
@@ -86,7 +92,7 @@ class RingBuffer:
 
 class AcquisitionThread(QThread):
     """
-    采集线程 (Phase 14: 增加流量埋点)
+    采集线程 (Phase 20: UDP & LSL Supported)
     """
     connection_result = pyqtSignal(bool, str)  # 连接结果(成功/失败, 信息)
     data_ready = pyqtSignal(object)  # 数据块
@@ -110,47 +116,91 @@ class AcquisitionThread(QThread):
         # 资源句柄
         ser = None
         bt = None
-        sock = None
+        sock = None  # TCP/UDP Socket
+        inlet = None  # LSL Inlet
+
+        # 缓冲区参数 (TCP/UDP)
+        # 假设协议格式: float32 * n_ch * pack_points
+        pack_points = 10  # 默认单包点数，TCP/UDP 可根据实际协议调整
+        if mode in ['tcp', 'udp']:
+            # NeuSenW TCP 默认是一次发较多数据，这里保持原有逻辑或通用逻辑
+            # 原 TCP 逻辑中 pack_points=40, bufsize=1440 (9ch * 40pts * 4bytes)
+            # 若是通用 UDP，假设包较小
+            if mode == 'tcp':
+                # 复用原 TCP 配置
+                n_ch = 9
+                pack_points = 40
+            else:
+                # UDP 自定义
+                pack_points = 1  # 简单的单点传输，或根据实际协议
+
+            bufsize = n_ch * pack_points * 4
 
         # --- Stage 1: 建立物理连接 ---
         try:
+            msg_connected = ""
+
             if mode == 'serial':
                 if not serial: raise RuntimeError("Missing pyserial")
                 ser = serial.Serial(self.cfg['port'], self.cfg.get('baud', 115200), timeout=0.1)
+                msg_connected = f"串口已连接: {self.cfg['port']}"
 
             elif mode == 'bluetooth':
                 if not BluetoothSocket: raise RuntimeError("Missing pybluez")
                 bt = BluetoothSocket(RFCOMM)
                 bt.connect((self.cfg['bt_addr'], 1))
+                msg_connected = f"蓝牙已连接: {self.cfg['bt_addr']}"
 
             elif mode == 'tcp':
                 ip = self.cfg.get('ip', '127.0.0.1')
                 port = int(self.cfg.get('port', 8712))
 
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(3.0)  # 连接超时 3s
+                sock.settimeout(3.0)
                 sock.connect((ip, port))
-
-                # 连接建立后，暂时设为非阻塞以便用 select 进行首包校验
                 sock.setblocking(False)
 
-                # NeuSenW 参数
-                srate = 1000
-                n_ch = 9
-                pack_points = 40
-                bufsize = n_ch * pack_points * 4  # 1440 bytes
-
-                # --- Stage 2: 首包校验 (Handshake via Data) ---
-                # 等待数据到来，超时 2s。如果硬件没开，这里会超时。
+                # TCP 握手校验
                 rlist, _, _ = select.select([sock], [], [], 2.0)
                 if not rlist:
-                    raise TimeoutError("连接建立，但未收到数据流 (请检查设备电源/采集软件)")
+                    raise TimeoutError("TCP 连接建立但无数据流")
 
-                # [Phase 14] 埋点：连接建立
                 self.sig_traffic.emit("INFO", f"TCP Handshake OK with {ip}:{port}")
+                msg_connected = f"TCP已连接: {ip}:{port}"
 
-            # 握手成功
-            self.connection_result.emit(True, f"已连接 ({mode}) - 数据流正常")
+            elif mode == 'udp':
+                ip = self.cfg.get('ip', '0.0.0.0')  # 默认监听所有
+                port = int(self.cfg.get('port', 8888))
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind((ip, port))
+                sock.setblocking(False)
+
+                # UDP 无连接状态，但可以尝试监听一下看是否有数据
+                self.sig_traffic.emit("INFO", f"UDP Server Bound to {ip}:{port}")
+                msg_connected = f"UDP监听中: {port}"
+
+            elif mode == 'lsl':
+                if not pylsl: raise RuntimeError("Missing pylsl (pip install pylsl)")
+
+                self.sig_traffic.emit("INFO", "Resolving LSL EEG stream...")
+                # 寻找 EEG 类型的流
+                streams = pylsl.resolve_stream('type', 'EEG')
+                if not streams:
+                    raise RuntimeError("未发现 LSL (type='EEG') 流")
+
+                inlet = pylsl.StreamInlet(streams[0])
+                info = inlet.info()
+                srate = info.nominal_srate()
+                n_ch = info.channel_count()
+
+                self.sig_traffic.emit("INFO", f"LSL Stream Found: {info.name()} ({n_ch}ch @ {srate}Hz)")
+                msg_connected = f"LSL已连接: {info.name()}"
+
+            else:
+                msg_connected = "演示模式运行中"
+
+            self.connection_result.emit(True, msg_connected)
 
         except Exception as e:
             self.connection_result.emit(False, str(e))
@@ -159,10 +209,10 @@ class AcquisitionThread(QThread):
             if sock: sock.close()
             if ser: ser.close()
             if bt: bt.close()
-            return  # 退出线程
+            if inlet: inlet.close_stream()
+            return
 
         # --- Stage 3: 采集循环 ---
-        # 演示模式参数
         t_sim = 0.0
         dt_sim = 1.0 / srate
 
@@ -174,6 +224,7 @@ class AcquisitionThread(QThread):
 
                 chunk = None
 
+                # === 1. Demo ===
                 if mode == 'demo':
                     n_gen = max(1, int(srate * 0.04))
                     time_vec = t_sim + np.arange(n_gen) * dt_sim
@@ -184,12 +235,11 @@ class AcquisitionThread(QThread):
                     t_sim = time_vec[-1]
                     self.msleep(40)
 
+                # === 2. Serial ===
                 elif mode == 'serial':
                     if ser.in_waiting:
                         raw_s = ser.read(ser.in_waiting)
-                        # [Phase 14] 串口流量摘要
                         self.sig_traffic.emit("RX", f"Serial: {len(raw_s)} bytes")
-
                         lines = raw_s.decode(errors='ignore').split('\n')
                         vals = []
                         for line in lines:
@@ -205,39 +255,71 @@ class AcquisitionThread(QThread):
                     else:
                         self.msleep(10)
 
-                elif mode == 'tcp':
-                    # 使用 select 监听，超时 1.0s (心跳)
+                # === 3. TCP / UDP ===
+                elif mode in ['tcp', 'udp']:
+                    # Select 超时 1s
                     rlist, _, _ = select.select([sock], [], [], 1.0)
-
                     if not rlist:
-                        continue  # 超时，检查 _running
+                        continue
 
-                    # 读取数据 (阻塞直到读满 bufsize 或报错)
                     try:
-                        sock.setblocking(True)  # 临时切回阻塞以确保 MSG_WAITALL
-                        raw_bytes = sock.recv(bufsize, socket.MSG_WAITALL)
-                        sock.setblocking(False)  # 切回非阻塞给 select 用
+                        raw_bytes = None
+                        if mode == 'tcp':
+                            # TCP 需要读满包长
+                            try:
+                                sock.setblocking(True)
+                                raw_bytes = sock.recv(bufsize, socket.MSG_WAITALL)
+                                sock.setblocking(False)
+                            except BlockingIOError:
+                                pass
+                        else:
+                            # UDP 直接读包
+                            raw_bytes, addr = sock.recvfrom(4096)  # 读足够大的 buffer
 
                         if not raw_bytes:
-                            raise RuntimeError("远程主机关闭了连接")
+                            if mode == 'tcp': raise RuntimeError("Remote closed")
+                            continue
 
-                        if len(raw_bytes) != bufsize:
-                            continue  # 丢包
+                        # 埋点
+                        self.sig_traffic.emit("RX", f"{mode.upper()} Pkt: {len(raw_bytes)}B")
 
-                        # [Phase 14] TCP 流量摘要 (仅长度，防刷屏)
-                        self.sig_traffic.emit("RX", f"TCP Packet: {len(raw_bytes)} bytes")
+                        # 解析: 假设是 float32 数组
+                        # 如果是 UDP，长度可能不固定，动态计算点数
+                        recv_len = len(raw_bytes)
+                        n_floats = recv_len // 4
 
-                        # 解析
-                        n_items = n_ch * pack_points
-                        vals = struct.unpack('<' + ('f' * n_items), raw_bytes)
-                        chunk = np.array(vals, dtype=np.float32).reshape(pack_points, n_ch)
+                        # 完整性校验
+                        if recv_len % 4 != 0:
+                            self.sig_traffic.emit("INFO", f"Align Warning: {recv_len} % 4 != 0")
 
-                    except BlockingIOError:
-                        continue
+                        # 如果点数不够 reshape，则丢弃或截断
+                        # 此处假设数据是紧密排列的 (points * n_ch)
+                        valid_floats = n_floats - (n_floats % n_ch)
+                        if valid_floats > 0:
+                            fmt = '<' + ('f' * valid_floats)
+                            # 只解包有效部分
+                            vals = struct.unpack(fmt, raw_bytes[:valid_floats * 4])
+                            pts = valid_floats // n_ch
+                            chunk = np.array(vals, dtype=np.float32).reshape(pts, n_ch)
+
                     except Exception as e:
-                        raise e
+                        if mode == 'tcp': raise e  # TCP 错误通常致命
+                        # UDP 错误可能是临时网络问题，忽略
+                        pass
 
-                # 发送数据
+                # === 4. LSL ===
+                elif mode == 'lsl':
+                    # pull_chunk returns (samples, timestamps)
+                    # timeout=0.0 为非阻塞
+                    samples, timestamps = inlet.pull_chunk(timeout=0.0)
+                    if samples:
+                        # samples 是 list of list
+                        chunk = np.array(samples, dtype=np.float32)
+                        self.sig_traffic.emit("RX", f"LSL Chunk: {len(samples)} samples")
+                    else:
+                        self.msleep(10)
+
+                # 发送数据到 UI / Worker
                 if chunk is not None and chunk.size > 0:
                     self.data_ready.emit(chunk)
 
@@ -245,10 +327,12 @@ class AcquisitionThread(QThread):
             if self._running:
                 self.error_occurred.emit(f"采集异常: {e}")
         finally:
+            # 资源清理
             try:
                 if ser: ser.close()
                 if bt: bt.close()
                 if sock: sock.close()
+                if inlet: inlet.close_stream()
             except:
                 pass
 
@@ -295,7 +379,7 @@ class EEGWorker(QObject):
             return
 
         self.last_config = config
-        self.sig_status_msg.emit("正在握手 (等待数据流)...")
+        self.sig_status_msg.emit("正在连接设备...")
 
         self.acq_thread = AcquisitionThread(config)
         self.acq_thread.connection_result.connect(self._on_thread_connection_result)
@@ -322,9 +406,14 @@ class EEGWorker(QObject):
     def _init_runtime_resources(self):
         self.srate = self.last_config.get('srate', 250)
         self.n_channels = self.last_config.get('n_channels', 8)
-        if self.last_config.get('mode') == 'tcp':
+
+        # 特殊模式的默认覆盖
+        mode = self.last_config.get('mode')
+        if mode == 'tcp':
             self.srate = 1000
             self.n_channels = 9
+        # UDP 和 LSL 的通道/采样率最好在 UI 配置或握手后动态更新
+        # 但为保持简单，这里暂沿用 UI 传入的配置或默认值
 
         self.buffer = RingBuffer(self.n_channels, int(self.srate * 10))
 
@@ -398,7 +487,7 @@ class EEGWorker(QObject):
         raw = self.buffer.get_last(n_samples)
         if raw is None: return
 
-        eeg_data = raw[:, :8]
+        eeg_data = raw[:, :8]  # 取前8通道
 
         eeg_data = dsp.notch_filter(eeg_data, self.srate, freq=self.notch_freq)
         eeg_data = dsp.butter_filter(eeg_data, self.srate,
